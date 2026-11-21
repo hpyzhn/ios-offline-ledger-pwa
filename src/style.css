@@ -1,0 +1,432 @@
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+:root {
+  --wx-green: #2EB872;
+  --wx-green-dark: #259B5E;
+  --wx-bg: #F5F6F7;
+  --wx-card: #FFFFFF;
+  --wx-text: #191919;
+  --wx-sub: #7F848A;
+  --wx-border: #EAECEF;
+  --wx-red: #E54D42;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--wx-bg);
+  color: var(--wx-text);
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+  font-size: 15px;
+  overscroll-behavior-y: none;
+}
+
+input, select, textarea, button {
+  font-family: inherit;
+  font-size: 16px;
+}
+
+.app-shell {
+  min-height: 100vh;
+  padding-bottom: calc(68px + env(safe-area-inset-bottom));
+}
+
+.wx-header {
+  background: var(--wx-green);
+  color: #FFFFFF;
+  padding: calc(14px + env(safe-area-inset-top)) 16px 16px;
+}
+
+.wx-header-title {
+  text-align: center;
+  font-size: 17px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.offline-badge {
+  font-size: 11px;
+  background: rgba(0, 0, 0, 0.22);
+  padding: 2px 8px;
+  border-radius: 99px;
+}
+
+.pill-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.2);
+  color: #FFFFFF;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 11px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.wx-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.94);
+}
+
+.month-input {
+  background: transparent;
+  border: none;
+  color: #FFFFFF;
+  font-size: 15px;
+  font-weight: 600;
+  padding: 2px 4px;
+  outline: none;
+}
+
+.toolbar {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px;
+  background: #FFFFFF;
+  border-bottom: 1px solid var(--wx-border);
+}
+
+.search-input {
+  flex: 1;
+  background: var(--wx-bg);
+  border: none;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 14px;
+  outline: none;
+}
+
+.status-select {
+  background: var(--wx-bg);
+  border: none;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 14px;
+  color: var(--wx-text);
+}
+
+.bill-list {
+  padding: 10px 12px 90px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bill-card {
+  background: var(--wx-card);
+  border-radius: 10px;
+  padding: 14px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.bill-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.bill-customer {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.bill-meta {
+  font-size: 12px;
+  color: var(--wx-sub);
+  margin-top: 2px;
+}
+
+.bill-amount {
+  font-size: 18px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.tag {
+  display: inline-block;
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.tag-verified { background: #E8F8F0; color: var(--wx-green-dark); }
+.tag-pending { background: #FEF3C7; color: #B45309; }
+
+.bill-items-preview {
+  font-size: 13px;
+  color: #4B5563;
+  background: #F9FAFB;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 8px 0 10px;
+  line-height: 1.55;
+}
+
+.bill-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.btn-sm {
+  border: 1px solid var(--wx-border);
+  background: #FFFFFF;
+  color: var(--wx-text);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.btn-sm.primary { border-color: var(--wx-green); color: var(--wx-green-dark); }
+.btn-sm.danger { border-color: #FECACA; color: var(--wx-red); }
+
+.fab-btn {
+  position: fixed;
+  right: 18px;
+  bottom: calc(78px + env(safe-area-inset-bottom));
+  background: #FFFFFF;
+  color: var(--wx-green-dark);
+  border: 1px solid #E5E7EB;
+  border-radius: 999px;
+  padding: 11px 18px;
+  font-size: 15px;
+  font-weight: 600;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  z-index: 30;
+}
+
+.bottom-nav {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: calc(58px + env(safe-area-inset-bottom));
+  padding-bottom: env(safe-area-inset-bottom);
+  background: #FFFFFF;
+  border-top: 1px solid var(--wx-border);
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  z-index: 40;
+}
+
+.nav-item {
+  border: none;
+  background: transparent;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--wx-sub);
+  cursor: pointer;
+}
+
+.nav-item.active {
+  color: var(--wx-green-dark);
+  font-weight: 600;
+}
+
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal-sheet {
+  width: 100%;
+  max-width: 640px;
+  max-height: 92vh;
+  background: #FFFFFF;
+  border-radius: 14px 14px 0 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--wx-border);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.modal-body {
+  padding: 14px 16px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.modal-footer {
+  padding: 12px 16px;
+  border-top: 1px solid var(--wx-border);
+  display: flex;
+  gap: 10px;
+}
+
+.btn-block {
+  flex: 1;
+  border: none;
+  border-radius: 8px;
+  padding: 11px 12px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-primary { background: var(--wx-green); color: #FFFFFF; }
+.btn-secondary { background: #F3F4F6; color: var(--wx-text); }
+
+.form-group { margin-bottom: 12px; }
+
+.form-label {
+  display: block;
+  font-size: 13px;
+  color: var(--wx-sub);
+  margin-bottom: 5px;
+}
+
+.form-control {
+  width: 100%;
+  border: 1px solid #D1D5DB;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 16px;
+  background: #FFFFFF;
+}
+
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+
+.empty-state {
+  text-align: center;
+  padding: 56px 20px;
+  color: var(--wx-sub);
+}
+
+/* 横向结算预览表 */
+.matrix-scroll {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid #D1D5DB;
+  border-radius: 8px;
+  background: #FFFFFF;
+}
+
+.matrix-table {
+  border-collapse: collapse;
+  font-size: 12px;
+  white-space: nowrap;
+  width: 100%;
+}
+
+.matrix-table th, .matrix-table td {
+  border: 1px solid #E5E7EB;
+  padding: 5px 7px;
+  text-align: center;
+}
+
+.matrix-table th {
+  background: #F3F4F6;
+  font-weight: 600;
+}
+
+.matrix-table td.sticky-col, .matrix-table th.sticky-col {
+  position: sticky;
+  left: 0;
+  background: #FFFFFF;
+  z-index: 2;
+  font-weight: 600;
+  border-right: 2px solid #D1D5DB;
+}
+
+.matrix-table th.sticky-col { background: #F3F4F6; }
+
+/* 电子单据纸质样式 */
+.receipt-paper {
+  border: 1.5px solid #1F2937;
+  padding: 14px;
+  background: #FFFFFF;
+  color: #111827;
+  font-size: 13px;
+}
+
+.receipt-title {
+  text-align: center;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  margin-bottom: 6px;
+}
+
+.receipt-no {
+  text-align: right;
+  color: #B91C1C;
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.receipt-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0;
+}
+
+.receipt-table th, .receipt-table td {
+  border: 1px solid #374151;
+  padding: 5px 6px;
+  text-align: center;
+  font-size: 12px;
+}
+
+.receipt-table td.num { text-align: right; }
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 0;
+  border-bottom: 1px solid #F3F4F6;
+  font-size: 14px;
+}
+
+@media print {
+  .bottom-nav, .fab-btn, .modal-header, .modal-footer, .no-print {
+    display: none !important;
+  }
+  .modal-mask { position: static; background: #FFFFFF; }
+  .modal-sheet { max-height: none; border-radius: 0; }
+}
