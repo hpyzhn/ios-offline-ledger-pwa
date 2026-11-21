@@ -65,8 +65,7 @@ function lookupPriceAndUnit(itemName, customerObj, globalProducts) {
  * 解析单条记录（可能来自单行，也可能来自 ---/空行 分隔的多行块）
  */
 function parseOneRecord(blockText, existingCustomers, globalProducts) {
-  let work = blockText.replace(/[\r]+/g, '
-').trim()
+  let work = blockText.replace(/[\r]+/g, '\n').trim()
   if (!work) return null
 
   // 合并多行成易解析的令牌流，同时优先抽取带显式标签的字段
