@@ -37,7 +37,7 @@ export const cloudConfigured = Boolean(getActiveCloudUrl())
 if (cloudConfigured) {
   db.cloud.configure({
     databaseUrl: getActiveCloudUrl(),
-    requireAuth: false,
+    requireAuth: false, // 仅首次手动登录，之后自动沿用本地持久化 Token，不主动弹窗
     tryUseServiceWorker: false
   })
 }
