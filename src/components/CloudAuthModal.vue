@@ -42,7 +42,15 @@ async function handleLogin() {
   busy.value = true
   tip.value = ''
   try {
+    // 如果本地已经处于登录态且邮箱一致，直接同步，不再重复发送验证码
+    const cur = db.cloud.currentUser?.value
     const email = emailInput.value.trim()
+    if (cur?.isLoggedIn && (!email || cur.email === email)) {
+      await db.cloud.sync({ wait: true })
+      tip.value = '当前已保持登录状态，已完成同步'
+      emit('synced')
+      return
+    }
     if (email) {
       await db.cloud.login({ email })
     } else {
