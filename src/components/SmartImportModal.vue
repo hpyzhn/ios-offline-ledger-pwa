@@ -5,6 +5,7 @@ import { formatMoney } from '../utils/rmb'
 
 const props = defineProps({
   visible: Boolean,
+  busy: Boolean,
   customers: Array,
   products: Array
 })
@@ -51,9 +52,9 @@ const totalImportAmount = computed(() =>
 )
 
 function handleConfirm() {
+  if (props.busy) return
   if (selectedRecords.value.length === 0) return alert('请先识别并勾选至少一条有效账单')
   emit('confirmImport', JSON.parse(JSON.stringify(selectedRecords.value)))
-  clearAll()
 }
 </script>
 
@@ -157,7 +158,7 @@ function handleConfirm() {
       </div>
 
       <div v-if="selectedRecords.length > 0" class="modal-footer">
-        <button class="btn-block btn-primary" @click="handleConfirm">
+        <button class="btn-block btn-primary" :disabled="busy" @click="handleConfirm">
           一键导入 {{ selectedRecords.length }} 笔账单（合计 ¥{{ formatMoney(totalImportAmount) }}）
         </button>
       </div>

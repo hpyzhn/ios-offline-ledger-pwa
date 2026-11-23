@@ -75,16 +75,26 @@ async function autoCheckAndUploadOfflineData(manual = false) {
   }
   if (pendingBills.length === 0 && !manual) return
 
+  if (syncingPending) return
   syncingPending = true
   syncBanner.value = `检测到 ${pendingBills.length} 条离线未同步账单，正在自动上传云端...`
   try {
     await db.cloud.sync({ wait: true })
     if (pendingBills.length > 0) {
-      await db.bills.where('syncStatus').equals('pending').modify({ syncStatus: 'synced' })
+      await db.transaction('rw', db.bills, async () => {
+        for (const snapshot of pendingBills) {
+          const latest = await db.bills.get(snapshot.id)
+          if (latest?.syncStatus === 'pending' && JSON.stringify(latest) === JSON.stringify(snapshot)) {
+            await db.bills.update(snapshot.id, { syncStatus: 'synced' })
+          }
+        }
+      })
       await db.cloud.sync({ wait: true })
     }
     await loadData()
-    syncBanner.value = pendingBills.length > 0
+    syncBanner.value = pendingSyncCount.value > 0
+      ? `同步期间有新的修改，仍有 ${pendingSyncCount.value} 条账单待确认上传`
+      : pendingBills.length > 0
       ? `已自动将 ${pendingBills.length} 条离线账单上传并同步到云端`
       : '云端与本地数据已完全同步'
     setTimeout(() => { syncBanner.value = '' }, 4000)
@@ -166,7 +176,7 @@ function openEditBill(bill) {
 async function handleSaveBill(payload) {
   const now = Date.now()
   const isSyncedReady = navigator.onLine && cloudConfigured && currentUser.value?.isLoggedIn
-  const syncFlag = isSyncedReady ? 'synced' : 'pending'
+  const syncFlag = 'pending'
 
   if (payload.id) {
     await db.bills.update(payload.id, { ...payload, syncStatus: syncFlag, updatedAt: now })
@@ -185,72 +195,85 @@ async function handleSaveBill(payload) {
   else await loadData()
 
   if (isSyncedReady) {
-    db.cloud.sync().catch(() => {})
+    autoCheckAndUploadOfflineData(false)
   }
 }
 
+const importing = ref(false)
 async function handleConfirmSmartImport(records) {
-  const now = Date.now()
-  const isSyncedReady = navigator.onLine && cloudConfigured && currentUser.value?.isLoggedIn
-  const syncFlag = isSyncedReady ? 'synced' : 'pending'
+  if (importing.value) return
+  importing.value = true
+  try {
+    const now = Date.now()
+    const isSyncedReady = navigator.onLine && cloudConfigured && currentUser.value?.isLoggedIn
+    const syncFlag = 'pending'
 
-  let createdCustomers = 0
-  for (let i = 0; i < records.length; i++) {
-    const rec = records[i]
-    // 1. 如客户不存在，自动创建新客户并把导入的类目设为该客户固定类目
-    let cust = await db.customers.where('name').equals(rec.customerName).first()
-    if (!cust) {
-      await db.customers.add({
-        name: rec.customerName,
-        categories: rec.items.map((it) => ({
-          name: it.name,
-          unit: it.unit || '条',
-          price: Number(it.price) || 0,
-          enabled: true
-        })),
-        exportTemplate: createDefaultExportTemplate(settings.value.companyName),
-        createdAt: now + i
-      })
-      createdCustomers++
-    } else {
-      // 已有客户但包含新类目时，自动补进固定类目
-      const list = Array.isArray(cust.categories) ? [...cust.categories] : []
-      let changed = false
-      rec.items.forEach((it) => {
-        if (!list.some((c) => c.name === it.name)) {
-          list.push({ name: it.name, unit: it.unit || '条', price: Number(it.price) || 0, enabled: true })
-          changed = true
+    let createdCustomers = 0
+    await db.transaction('rw', db.customers, db.bills, async () => {
+      for (let i = 0; i < records.length; i++) {
+        const rec = records[i]
+        if (!rec.items?.length || rec.items.some(i => !Number.isFinite(Number(i.qty)) || Number(i.qty) <= 0 || !Number.isFinite(Number(i.price)) || Number(i.price) < 0)) throw new Error('Invalid quantity or price')
+        rec.totalAmount = Number(rec.items.reduce((sum, i) => sum + Number(i.qty) * Number(i.price), 0).toFixed(2))
+        const existing = await db.bills.where('date').equals(rec.date).toArray()
+        if (existing.some(b => b.customerName === rec.customerName && JSON.stringify(b.items) === JSON.stringify(rec.items) && (b.remark || '') === (rec.remark || ''))) throw new Error('Duplicate bill: ' + rec.customerName + ' ' + rec.date)
+        // 1. 如客户不存在，自动创建新客户并把导入的类目设为该客户固定类目
+        let cust = await db.customers.where('name').equals(rec.customerName).first()
+        if (!cust) {
+          await db.customers.add({
+            name: rec.customerName,
+            categories: rec.items.map((it) => ({
+              name: it.name,
+              unit: it.unit || '条',
+              price: Number(it.price) || 0,
+              enabled: true
+            })),
+            exportTemplate: createDefaultExportTemplate(settings.value.companyName),
+            createdAt: now + i
+          })
+          createdCustomers++
+        } else {
+          // 已有客户但包含新类目时，自动补进固定类目
+          const list = Array.isArray(cust.categories) ? [...cust.categories] : []
+          let changed = false
+          rec.items.forEach((it) => {
+            if (!list.some((c) => c.name === it.name)) {
+              list.push({ name: it.name, unit: it.unit || '条', price: Number(it.price) || 0, enabled: true })
+              changed = true
+            }
+          })
+          if (changed) {
+            await db.customers.update(cust.id, { categories: list })
+          }
         }
-      })
-      if (changed) {
-        await db.customers.update(cust.id, { categories: list })
+
+        // 2. 写入账单
+        const billNo = await generateNextBillNo(rec.date)
+        await db.bills.add({
+          billNo,
+          customerName: rec.customerName,
+          date: rec.date,
+          month: rec.month,
+          paymentMethod: rec.paymentMethod || '月结挂账',
+          status: rec.status || 'pending',
+          remark: rec.remark || '',
+          items: rec.items,
+          totalAmount: Number(rec.totalAmount) || 0,
+          syncStatus: syncFlag,
+          createdAt: now + i,
+          updatedAt: now + i
+        })
       }
-    }
 
-    // 2. 写入账单
-    const billNo = await generateNextBillNo(rec.date)
-    await db.bills.add({
-      billNo,
-      customerName: rec.customerName,
-      date: rec.date,
-      month: rec.month,
-      paymentMethod: rec.paymentMethod || '月结挂账',
-      status: rec.status || 'pending',
-      remark: rec.remark || '',
-      items: rec.items,
-      totalAmount: Number(rec.totalAmount) || 0,
-      syncStatus: syncFlag,
-      createdAt: now + i,
-      updatedAt: now + i
     })
-  }
-
-  showSmartImport.value = false
-  await loadData()
-  if (isSyncedReady) {
-    db.cloud.sync().catch(() => {})
-  }
-  alert(`成功导入 ${records.length} 笔账单` + (createdCustomers > 0 ? `（同时自动新建 ${createdCustomers} 个客户档案）` : ''))
+    showSmartImport.value = false
+    await loadData()
+    if (isSyncedReady) {
+      autoCheckAndUploadOfflineData(false)
+    }
+    alert(`成功导入 ${records.length} 笔账单` + (createdCustomers > 0 ? `（同时自动新建 ${createdCustomers} 个客户档案）` : ''))
+  } catch (err) {
+    alert(err.message)
+  } finally { importing.value = false }
 }
 
 async function handleDeleteBill(bill) {
@@ -261,12 +284,13 @@ async function handleDeleteBill(bill) {
 
 async function handleToggleVerify(bill) {
   const nextStatus = bill.status === 'verified' ? 'pending' : 'verified'
-  const syncFlag = navigator.onLine && cloudConfigured && currentUser.value?.isLoggedIn ? 'synced' : 'pending'
+  const syncFlag = 'pending'
   await db.bills.update(bill.id, { status: nextStatus, syncStatus: syncFlag, updatedAt: Date.now() })
   if (previewBill.value?.id === bill.id) {
     previewBill.value = { ...previewBill.value, status: nextStatus }
   }
   await loadData()
+  autoCheckAndUploadOfflineData(false)
 }
 
 function openPreview(bill) {
@@ -455,6 +479,7 @@ async function handleRestoreJson(rawText) {
     />
     <SmartImportModal
       :visible="showSmartImport"
+      :busy="importing"
       :customers="customers"
       :products="products"
       @close="showSmartImport = false"
@@ -466,7 +491,7 @@ async function handleRestoreJson(rawText) {
       :settings="settings"
       :pending-sync-count="pendingSyncCount"
       @close="showAdminModal = false"
-      @updated="loadData"
+      @updated="loadData(); autoCheckAndUploadOfflineData(false)"
       @force-sync="autoCheckAndUploadOfflineData(true)"
     />
 

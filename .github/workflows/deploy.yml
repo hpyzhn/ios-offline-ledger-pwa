@@ -30,6 +30,7 @@ jobs:
       - name: Install & Build
         run: |
           npm install
+          node --test tests/regression.test.mjs
           npm run build
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

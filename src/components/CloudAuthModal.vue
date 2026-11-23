@@ -69,7 +69,7 @@ async function handleSyncNow() {
   busy.value = true
   tip.value = ''
   try {
-    await db.cloud.sync()
+    await db.cloud.sync({ wait: true })
     tip.value = '云端同步完成'
     emit('synced')
   } catch (err) {

@@ -109,6 +109,9 @@ const fixedTotal = computed(() =>
 )
 
 async function saveOrderFix() {
+  if (editItems.value.some(i => !Number.isFinite(Number(i.qty)) || !Number.isFinite(Number(i.price)) || Number(i.qty) < 0 || Number(i.price) < 0)) {
+    return alert('数量和单价必须是有效的非负数')
+  }
   const cleanItems = editItems.value
     .filter((i) => i.name && i.name.trim() && Number(i.qty) >= 0)
     .map((i) => ({
@@ -121,6 +124,7 @@ async function saveOrderFix() {
   if (cleanItems.length === 0) return alert('请至少保留一项有效商品')
   if (!editReason.value.trim()) return alert('请填写纠错原因，便于日后对账审计')
 
+  const savedTotal = Number(cleanItems.reduce((s, i) => s + i.qty * i.price, 0).toFixed(2))
   const oldBill = editingOrder.value
   const now = Date.now()
   const beforeSummary = (oldBill.items || [])
@@ -131,28 +135,30 @@ async function saveOrderFix() {
     .join('，')
 
   // 即使断网也会写入本地并标为 pending，联网后自动上传云盘
-  await db.bills.update(oldBill.id, {
-    items: cleanItems,
-    totalAmount: fixedTotal.value,
-    status: editStatus.value,
-    remark: editRemark.value.trim(),
-    syncStatus: 'pending',
-    updatedAt: now
-  })
+  await db.transaction('rw', db.bills, db.auditLogs, async () => {
+    await db.bills.update(oldBill.id, {
+      items: cleanItems,
+      totalAmount: savedTotal,
+      status: editStatus.value,
+      remark: editRemark.value.trim(),
+      syncStatus: 'pending',
+      updatedAt: now
+    })
 
-  await db.auditLogs.add({
-    billId: oldBill.id,
-    billNo: oldBill.billNo,
-    customerName: oldBill.customerName,
-    date: oldBill.date,
-    beforeAmount: Number(oldBill.totalAmount) || 0,
-    afterAmount: fixedTotal.value,
-    beforeSummary,
-    afterSummary,
-    reason: editReason.value.trim(),
-    createdAt: now
-  })
+    await db.auditLogs.add({
+      billId: oldBill.id,
+      billNo: oldBill.billNo,
+      customerName: oldBill.customerName,
+      date: oldBill.date,
+      beforeAmount: Number(oldBill.totalAmount) || 0,
+      afterAmount: savedTotal,
+      beforeSummary,
+      afterSummary,
+      reason: editReason.value.trim(),
+      createdAt: now
+    })
 
+  })
   editingOrder.value = null
   await loadAdminData()
   emit('updated')

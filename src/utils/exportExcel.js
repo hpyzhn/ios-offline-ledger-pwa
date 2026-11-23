@@ -77,7 +77,7 @@ export function buildSettlementPreview({ month, customer, bills, template, fallb
         row.days[dayIdx] = Number((row.days[dayIdx] + qty).toFixed(3))
       }
       row.totalQty = Number((row.totalQty + qty).toFixed(3))
-      const itemPrice = Number.isFinite(price) && price > 0 ? price : row.price
+      const itemPrice = Number.isFinite(price) ? price : row.price
       row.totalAmount = Number((row.totalAmount + qty * itemPrice).toFixed(2))
       if (b.status === 'verified') row.verifiedCount += 1
       else row.pendingCount += 1
@@ -238,13 +238,7 @@ export async function exportSettlementExcel({ month, customer, bills, template, 
       } else if (col.key === 'unitPrice') {
         cell.value = item.price
       } else if (col.key === 'totalAmount') {
-        if (qtyIdx >= 0 && priceIdx >= 0) {
-          const qLet = colToLetter(34 + qtyIdx)
-          const pLet = colToLetter(34 + priceIdx)
-          cell.value = { formula: `SUM(${qLet}${r}*${pLet}${r})`, result: item.totalAmount }
-        } else {
-          cell.value = item.totalAmount
-        }
+        cell.value = item.totalAmount
       } else if (col.key === 'unit') {
         cell.value = item.unit || ''
       } else if (col.key === 'verifyStatus') {

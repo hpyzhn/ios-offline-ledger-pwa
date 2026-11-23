@@ -130,6 +130,5 @@ export async function saveSettings(data) {
 
 export async function generateNextBillNo(dateStr) {
   const prefix = 'NO.' + dateStr.replace(/-/g, '')
-  const sameDay = await db.bills.where('date').equals(dateStr).count()
-  return `${prefix}${String(sameDay + 1).padStart(3, '0')}`
+  return `${prefix}-${crypto.randomUUID()}`
 }
