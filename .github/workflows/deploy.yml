@@ -5,37 +5,76 @@ on:
     branches: ['main']
   workflow_dispatch:
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
 concurrency:
   group: 'pages'
   cancel-in-progress: true
 
 jobs:
-  build-and-deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  # 构建与测试：产物先上传为 artifact，供部署 Job 使用。
+  # 拆分为独立 Job 是为了规避 actions/deploy-pages#451：
+  # 上传与部署同一 Job 紧邻执行时，产物列表接口存在最终一致性延迟，
+  # 偶发查不到刚上传的 github-pages 产物（官方建议上传放前一个 Job）。
+  build:
+    permissions:
+      contents: read
+      actions: write
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
-      - name: Install & Build
+          cache: npm
+
+      - name: Install, Test & Build
         run: |
-          npm install
+          npm ci
           node --test tests/*.test.mjs
           npm run build
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+          test -f dist/index.html
+
+      # 手动重跑工作流时会残留上一次尝试的 github-pages 产物，
+      # 重名会导致后续部署报 "Multiple artifacts named github-pages"，
+      # 因此上传前先清理本运行中的旧产物。
+      - name: Clean up stale pages artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ids=$(gh api --paginate "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+            --jq '.artifacts[] | select(.name=="github-pages") | .id')
+          for id in $ids; do
+            gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/$id"
+          done
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
         with:
           path: ./dist
+
+  # 部署 Job：与构建 Job 分离，给产物元数据留出可见时间
+  deploy:
+    needs: build
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment_retry.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for artifact visibility
+        run: sleep 5
+
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        continue-on-error: true
+        uses: actions/deploy-pages@v5
+
+      # 首次部署仍可能遇到产物查询的瞬时失败，自动重试一次
+      - name: Retry deploy on transient failure
+        id: deployment_retry
+        if: steps.deployment.outcome == 'failure'
+        uses: actions/deploy-pages@v5
