@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
-import { db, saveSettings } from '../db/database'
+import { db, verifyAdminPin, changeAdminPin, getAdminPinLockStatus, isAdminPinDefault } from '../db/database'
 import { formatMoney, numberToChineseRMB } from '../utils/rmb'
 
 const props = defineProps({
@@ -14,6 +14,8 @@ const emit = defineEmits(['close', 'updated', 'forceSync'])
 const unlocked = ref(false)
 const pinInput = ref('')
 const pinError = ref('')
+// 仍在使用出厂默认口令时，强制先修改口令才能使用订单纠错等管理员功能
+const pinMustChange = ref(false)
 
 const tab = ref('orders') // 'orders' | 'logs' | 'security'
 const allBills = ref([])
@@ -26,6 +28,8 @@ const editItems = ref([])
 const editStatus = ref('pending')
 const editRemark = ref('')
 const editReason = ref('')
+const savingFix = ref(false)
+const changingPin = ref(false)
 
 // 修改管理员密码
 const newPin = ref('')
@@ -40,23 +44,45 @@ watch(
   () => props.visible,
   (open) => {
     if (!open) {
+      // 关闭即自动上锁：重新打开后台必须再次输入口令，防止共用设备时被他人直接进入
+      unlocked.value = false
       editingOrder.value = null
       pinInput.value = ''
       pinError.value = ''
+      pinMustChange.value = false
+      // 口令失败计数与锁定状态由 database.js 全局持久化管理：
+      // 刷新页面、关闭再打开弹窗均无法重置，防止绕过防暴力破解限速
       return
     }
-    if (unlocked.value) loadAdminData()
+    if (unlocked.value) loadAdminData().catch((err) => alert('管理员数据加载失败：' + (err?.message || err)))
   }
 )
 
-function verifyPin() {
-  const expected = String(props.settings?.adminPin || '8888')
-  if (pinInput.value.trim() === expected) {
+async function verifyPin() {
+  // 统一走 database.js 的全局持久化限速（与删除/撤回核销的口令弹窗共用）
+  const pre = getAdminPinLockStatus()
+  if (pre.locked) {
+    pinError.value = `尝试过于频繁，已被锁定 ${Math.ceil(pre.retryAfterMs / 1000)} 秒（刷新页面不会解除）`
+    return
+  }
+  const ok = await verifyAdminPin(pinInput.value.trim())
+  if (ok) {
     unlocked.value = true
     pinError.value = ''
-    loadAdminData()
+    pinInput.value = ''
+    if (await isAdminPinDefault()) {
+      // 出厂默认口令（8888）已随开源代码公开：解锁后必须先修改口令
+      pinMustChange.value = true
+      return
+    }
+    loadAdminData().catch((err) => alert('管理员数据加载失败：' + (err?.message || err)))
   } else {
-    pinError.value = '管理员口令错误（默认口令：8888）'
+    const post = getAdminPinLockStatus()
+    if (post.locked) {
+      pinError.value = `连续多次口令错误，已锁定 ${Math.ceil(post.retryAfterMs / 1000)} 秒（刷新页面不会解除）`
+    } else {
+      pinError.value = `管理员口令错误（剩余 ${post.remainingAttempts} 次机会）`
+    }
   }
 }
 
@@ -64,6 +90,9 @@ function lockAdmin() {
   unlocked.value = false
   editingOrder.value = null
   pinInput.value = ''
+  pinError.value = ''
+  pinMustChange.value = false
+  // 失败计数与锁定时间保存在全局持久化状态中，无法用“锁定再进入”重置口令尝试限制
 }
 
 const filteredOrders = computed(() => {
@@ -109,71 +138,100 @@ const fixedTotal = computed(() =>
 )
 
 async function saveOrderFix() {
-  if (editItems.value.some(i => !Number.isFinite(Number(i.qty)) || !Number.isFinite(Number(i.price)) || Number(i.qty) < 0 || Number(i.price) < 0)) {
-    return alert('数量和单价必须是有效的非负数')
+  // 防重复提交：并发双击只允许一次纠错写入，避免重复审计日志
+  if (savingFix.value) return
+  savingFix.value = true
+  try {
+    if (editItems.value.some(i => !Number.isFinite(Number(i.qty)) || !Number.isFinite(Number(i.price)) || Number(i.qty) < 0 || Number(i.price) < 0)) {
+      return alert('数量和单价必须是有效的非负数')
+    }
+    const cleanItems = editItems.value
+      .filter((i) => i.name && i.name.trim() && Number(i.qty) >= 0)
+      .map((i) => ({
+        name: i.name.trim(),
+        unit: (i.unit || '条').trim(),
+        qty: Number(i.qty) || 0,
+        price: Number(i.price) || 0
+      }))
+
+    if (cleanItems.length === 0) return alert('请至少保留一项有效商品')
+    if (!editReason.value.trim()) return alert('请填写纠错原因，便于日后对账审计')
+
+    const savedTotal = Number(cleanItems.reduce((s, i) => s + i.qty * i.price, 0).toFixed(2))
+    const oldBill = editingOrder.value
+    const now = Date.now()
+    const beforeSummary = (oldBill.items || [])
+      .map((i) => `${i.name}:${i.qty}×¥${i.price}`)
+      .join('，')
+    const afterSummary = cleanItems
+      .map((i) => `${i.name}:${i.qty}×¥${i.price}`)
+      .join('，')
+
+    // 即使断网也会写入本地并标为 pending，联网后自动上传云盘
+    await db.transaction('rw', db.bills, db.auditLogs, async () => {
+      // 乐观并发控制：以库内最新记录为准，防止覆盖其他窗口/设备的修改或对已删除账单写审计
+      const latest = await db.bills.get(oldBill.id)
+      if (!latest) throw new Error('该账单已被删除，无法纠错，请返回列表刷新')
+      if ((latest.updatedAt || 0) !== (oldBill.updatedAt || 0)) {
+        throw new Error('该账单已被其他窗口或设备修改，请返回列表刷新后重新纠错')
+      }
+      await db.bills.update(oldBill.id, {
+        items: cleanItems,
+        totalAmount: savedTotal,
+        status: editStatus.value,
+        remark: editRemark.value.trim(),
+        syncStatus: 'pending',
+        updatedAt: now
+      })
+
+      await db.auditLogs.add({
+        billId: oldBill.id,
+        billNo: oldBill.billNo,
+        customerName: oldBill.customerName,
+        date: oldBill.date,
+        beforeAmount: Number(oldBill.totalAmount) || 0,
+        afterAmount: savedTotal,
+        beforeSummary,
+        afterSummary,
+        reason: editReason.value.trim(),
+        createdAt: now
+      })
+
+    })
+    editingOrder.value = null
+    await loadAdminData()
+    emit('updated')
+    alert('管理员纠错已保存（联网将自动同步至云端）')
+  } catch (err) {
+    alert('纠错保存失败：' + (err?.message || err))
+    throw err
+  } finally {
+    savingFix.value = false
   }
-  const cleanItems = editItems.value
-    .filter((i) => i.name && i.name.trim() && Number(i.qty) >= 0)
-    .map((i) => ({
-      name: i.name.trim(),
-      unit: (i.unit || '条').trim(),
-      qty: Number(i.qty) || 0,
-      price: Number(i.price) || 0
-    }))
-
-  if (cleanItems.length === 0) return alert('请至少保留一项有效商品')
-  if (!editReason.value.trim()) return alert('请填写纠错原因，便于日后对账审计')
-
-  const savedTotal = Number(cleanItems.reduce((s, i) => s + i.qty * i.price, 0).toFixed(2))
-  const oldBill = editingOrder.value
-  const now = Date.now()
-  const beforeSummary = (oldBill.items || [])
-    .map((i) => `${i.name}:${i.qty}×¥${i.price}`)
-    .join('，')
-  const afterSummary = cleanItems
-    .map((i) => `${i.name}:${i.qty}×¥${i.price}`)
-    .join('，')
-
-  // 即使断网也会写入本地并标为 pending，联网后自动上传云盘
-  await db.transaction('rw', db.bills, db.auditLogs, async () => {
-    await db.bills.update(oldBill.id, {
-      items: cleanItems,
-      totalAmount: savedTotal,
-      status: editStatus.value,
-      remark: editRemark.value.trim(),
-      syncStatus: 'pending',
-      updatedAt: now
-    })
-
-    await db.auditLogs.add({
-      billId: oldBill.id,
-      billNo: oldBill.billNo,
-      customerName: oldBill.customerName,
-      date: oldBill.date,
-      beforeAmount: Number(oldBill.totalAmount) || 0,
-      afterAmount: savedTotal,
-      beforeSummary,
-      afterSummary,
-      reason: editReason.value.trim(),
-      createdAt: now
-    })
-
-  })
-  editingOrder.value = null
-  await loadAdminData()
-  emit('updated')
-  alert('管理员纠错已保存（联网将自动同步至云端）')
 }
 
 async function handleChangePin() {
+  if (changingPin.value) return
   const p1 = newPin.value.trim()
-  if (p1.length < 4) return alert('新口令至少需要 4 位字符')
+  if (p1.length < 6) return alert('新口令至少需要 6 位字符')
   if (p1 !== confirmPin.value.trim()) return alert('两次输入的口令不一致')
-  await saveSettings({ adminPin: p1 })
-  newPin.value = ''
-  confirmPin.value = ''
-  emit('updated')
-  alert('管理员口令已更新')
+  changingPin.value = true
+  try {
+    await changeAdminPin(p1)
+    newPin.value = ''
+    confirmPin.value = ''
+    if (pinMustChange.value) {
+      // 默认口令修改完成后解锁全部管理员功能
+      pinMustChange.value = false
+      loadAdminData().catch((err) => alert('管理员数据加载失败：' + (err?.message || err)))
+    }
+    emit('updated')
+    alert('管理员口令已更新')
+  } catch (err) {
+    alert('口令保存失败：' + (err?.message || err))
+  } finally {
+    changingPin.value = false
+  }
 }
 
 function fmtTime(ts) {
@@ -199,7 +257,7 @@ function fmtTime(ts) {
           <div style="font-size:28px;margin-bottom:6px;">🔐</div>
           <div style="font-weight:600;font-size:16px;">请输入管理员口令</div>
           <div style="font-size:12px;color:#7F848A;margin-top:4px;">
-            拥有强制修改已核销/错填数量及单价订单权限（初始口令：8888）
+            拥有强制修改已核销/错填数量及单价订单权限
           </div>
         </div>
         <div class="form-group">
@@ -213,6 +271,26 @@ function fmtTime(ts) {
           <div v-if="pinError" style="color:#E54D42;font-size:12px;margin-top:6px;">{{ pinError }}</div>
         </div>
         <button class="btn-block btn-primary" style="width:100%;" @click="verifyPin">验证并进入后台</button>
+      </div>
+
+      <!-- 已解锁但仍使用出厂默认口令：强制先修改口令，其余管理员功能锁定 -->
+      <div v-else-if="pinMustChange" class="modal-body" style="padding: 24px 18px;">
+        <div style="background:#FEF3C7;border-radius:10px;padding:12px;margin-bottom:16px;">
+          <div style="font-weight:600;">⚠️ 安全提醒</div>
+          <div style="font-size:13px;color:#92400E;margin-top:4px;line-height:1.5;">
+            当前仍在使用出厂默认口令（8888）。该口令已随开源代码公开，任何人都可冒充管理员修改账单。
+            请立即设置新口令；修改完成前，订单纠错等管理员功能保持锁定。
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">设置新的管理员口令</label>
+          <input v-model="newPin" type="password" class="form-control" placeholder="输入新口令（至少6位）" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">确认新口令</label>
+          <input v-model="confirmPin" type="password" class="form-control" placeholder="再次输入新口令" />
+        </div>
+        <button class="btn-block btn-primary" style="width:100%;" :disabled="changingPin" @click="handleChangePin">保存新口令</button>
       </div>
 
       <!-- 已解锁：正在编辑单个错单 -->
@@ -285,8 +363,8 @@ function fmtTime(ts) {
           <div style="font-size:12px;color:#92400E;">大写：{{ numberToChineseRMB(fixedTotal) }}</div>
         </div>
 
-        <button class="btn-block btn-primary" style="width:100%;" @click="saveOrderFix">
-          确认覆盖修正并记录日志
+        <button class="btn-block btn-primary" style="width:100%;" :disabled="savingFix" @click="saveOrderFix">
+          {{ savingFix ? '正在保存...' : '确认覆盖修正并记录日志' }}
         </button>
       </div>
 
@@ -371,13 +449,13 @@ function fmtTime(ts) {
 
           <div class="form-group">
             <label class="form-label">设置新的管理员口令</label>
-            <input v-model="newPin" type="password" class="form-control" placeholder="输入新口令（至少4位）" />
+            <input v-model="newPin" type="password" class="form-control" placeholder="输入新口令（至少6位）" />
           </div>
           <div class="form-group">
             <label class="form-label">确认新口令</label>
             <input v-model="confirmPin" type="password" class="form-control" placeholder="再次输入新口令" />
           </div>
-          <button class="btn-block btn-primary" style="width:100%;" @click="handleChangePin">保存新口令</button>
+          <button class="btn-block btn-primary" style="width:100%;" :disabled="changingPin" @click="handleChangePin">保存新口令</button>
         </div>
       </div>
     </div>

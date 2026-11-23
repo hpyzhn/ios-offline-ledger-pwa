@@ -12,8 +12,6 @@ const emit = defineEmits([
   'addCustomer',
   'updateCustomerCategories',
   'deleteCustomer',
-  'addProduct',
-  'deleteProduct',
   'saveSettings',
   'backupJson',
   'restoreJson',
@@ -66,54 +64,62 @@ function handleCreateCustomer() {
   newCustomerName.value = ''
 }
 
+// 类目变更只发送“操作指令”，由 App 在事务内读取最新数据后应用，
+// 避免基于 UI 旧快照构造整个数组回写，导致连续快速操作互相覆盖（丢失更新）
 function addCategoryToCustomer() {
   if (!activeCustomer.value) return
   const name = catName.value.trim()
   if (!name) return alert('请输入类目名称')
-  const list = JSON.parse(JSON.stringify(activeCustomer.value.categories || []))
-  if (list.some((c) => c.name === name)) return alert('该客户已存在同名类目')
-  list.push({ name, unit: catUnit.value.trim() || '条', price: Number(catPrice.value) || 0, enabled: true })
-  emit('updateCustomerCategories', { customerId: activeCustomer.value.id, categories: list })
+  const price = Number(catPrice.value)
+  if (!Number.isFinite(price) || price < 0) return alert('单价必须是有效的非负数')
+  if ((Array.isArray(activeCustomer.value.categories) ? activeCustomer.value.categories : []).some((c) => c.name === name)) return alert('该客户已存在同名类目')
+  emit('updateCustomerCategories', {
+    customerId: activeCustomer.value.id,
+    op: 'add',
+    category: { name, unit: catUnit.value.trim() || '条', price, enabled: true }
+  })
   catName.value = ''
   catPrice.value = 1.0
 }
 
 function updateCategoryPrice(idx, price) {
-  const list = JSON.parse(JSON.stringify(activeCustomer.value.categories || []))
-  list[idx].price = Number(price) || 0
-  emit('updateCustomerCategories', { customerId: activeCustomer.value.id, categories: list })
+  if (!activeCustomer.value) return
+  emit('updateCustomerCategories', { customerId: activeCustomer.value.id, op: 'updatePrice', index: idx, price, name: (activeCustomer.value.categories || [])[idx]?.name })
 }
 
 function moveCategory(idx, delta) {
-  const list = JSON.parse(JSON.stringify(activeCustomer.value.categories || []))
-  const t = idx + delta
-  if (t < 0 || t >= list.length) return
-  const tmp = list[idx]
-  list[idx] = list[t]
-  list[t] = tmp
-  emit('updateCustomerCategories', { customerId: activeCustomer.value.id, categories: list })
+  if (!activeCustomer.value) return
+  emit('updateCustomerCategories', { customerId: activeCustomer.value.id, op: 'move', index: idx, delta, name: (activeCustomer.value.categories || [])[idx]?.name })
 }
 
 function removeCategoryFromCustomer(idx) {
-  const list = JSON.parse(JSON.stringify(activeCustomer.value.categories || []))
-  list.splice(idx, 1)
-  emit('updateCustomerCategories', { customerId: activeCustomer.value.id, categories: list })
+  if (!activeCustomer.value) return
+  emit('updateCustomerCategories', { customerId: activeCustomer.value.id, op: 'remove', index: idx, name: (activeCustomer.value.categories || [])[idx]?.name })
 }
 
 function handleSaveProfile() {
+  // 保存结果由 App 事务完成后提示，避免写入失败时这里先弹出“已保存”误导用户
   emit('saveSettings', {
     companyName: companyName.value.trim() || '广州市羽洁洗涤厂结算表',
     handlerName: handlerName.value.trim() || '经手人'
   })
-  alert('默认结算表抬头已保存')
 }
 
 function onFileChange(e) {
   const file = e.target.files?.[0]
   if (!file) return
+  if (file.size > 20 * 1024 * 1024) {
+    alert('备份文件过大（超过 20MB），已取消导入')
+    e.target.value = ''
+    return
+  }
   const reader = new FileReader()
   reader.onload = () => {
     emit('restoreJson', reader.result)
+    e.target.value = ''
+  }
+  reader.onerror = () => {
+    alert('备份文件读取失败，请重试')
     e.target.value = ''
   }
   reader.readAsText(file)

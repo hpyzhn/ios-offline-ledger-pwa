@@ -27,10 +27,10 @@ watch(
 
 function handleSaveUrl() {
   const clean = urlInput.value.trim()
-  if (clean && !clean.startsWith('https://')) {
-    return alert('云数据库地址必须以 https:// 开头（例如 https://xxxx.dexie.cloud）')
+  // 底层仅接受 https://xxx.dexie.cloud 官方地址，防止同步数据被指向任意第三方服务器
+  if (!setSavedCloudUrl(clean)) {
+    return alert('云数据库地址无效：仅支持 https://xxxx.dexie.cloud 形式的 Dexie Cloud 官方地址')
   }
-  setSavedCloudUrl(clean)
   alert(clean ? '云同步地址已保存，页面将自动刷新生效' : '已清除云同步地址，将切回纯本地模式')
   window.location.reload()
 }
@@ -85,6 +85,8 @@ async function handleLogout() {
   try {
     await db.cloud.logout()
     emit('synced')
+  } catch (err) {
+    tip.value = '退出登录失败：' + (err?.message || err)
   } finally {
     busy.value = false
   }
@@ -147,7 +149,7 @@ async function handleLogout() {
         <div style="border-top:1px solid #EAECEF;padding-top:14px;">
           <div style="font-weight:600;font-size:14px;margin-bottom:6px;">Dexie Cloud 云数据库地址（0 元/月免费版）</div>
           <div style="font-size:12px;color:#6B7280;margin-bottom:8px;line-height:1.5;">
-            在电脑终端执行 <code>npx dexie-cloud create</code> 后，把得到的 <code>https://xxxx.dexie.cloud</code> 粘贴到此处保存（也可直接写入 <code>src/db/database.js</code> 供所有人自动连接）。
+            在电脑终端执行 <code>npx dexie-cloud create</code> 后，把得到的 <code>https://xxxx.dexie.cloud</code> 粘贴到此处保存（或构建时通过环境变量 <code>VITE_DEXIE_CLOUD_URL</code> 注入，供所有人自动连接）。
           </div>
           <div style="display:flex;gap:8px;">
             <input

@@ -46,7 +46,7 @@ test('admin total uses saved rows and audit failure rolls back bill', async () =
   let bill = structuredClone(original)
   let fail = true
   const db = {
-    bills: { update: async (_, change) => Object.assign(bill, change), orderBy: () => ({ reverse: () => ({ toArray: async () => [] }) }) },
+    bills: { update: async (_, change) => Object.assign(bill, change), get: async () => structuredClone(bill), orderBy: () => ({ reverse: () => ({ toArray: async () => [] }) }) },
     auditLogs: { add: async () => { if (fail) throw Error('audit failure') }, orderBy: () => ({ reverse: () => ({ limit: () => ({ toArray: async () => [] }) }) }) },
     transaction: async (...args) => { const before = structuredClone(bill); try { await args.at(-1)() } catch(e) { bill = before; throw e } }
   }

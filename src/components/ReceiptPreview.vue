@@ -8,6 +8,11 @@ defineProps({
 })
 
 const emit = defineEmits(['close', 'toggleVerify'])
+
+// Vue 模板无法直接访问 window，需通过 setup 暴露的方法调用打印
+function printReceipt() {
+  if (typeof window !== 'undefined' && typeof window.print === 'function') window.print()
+}
 </script>
 
 <template>
@@ -16,7 +21,7 @@ const emit = defineEmits(['close', 'toggleVerify'])
       <div class="modal-header no-print">
         <button class="btn-sm" @click="emit('close')">关闭</button>
         <span>电子单据（可截屏发客户核销）</span>
-        <button class="btn-sm primary" @click="window.print()">打印</button>
+        <button class="btn-sm primary" @click="printReceipt">打印</button>
       </div>
 
       <div class="modal-body">

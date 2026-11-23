@@ -12,6 +12,13 @@ function colToLetter(colNum1Based) {
   return s
 }
 
+// 防止用户可控文本（客户名/类目/备注等）被 Excel 当作公式执行（公式注入）
+function sanitizeCell(value) {
+  if (value === null || value === undefined) return null
+  const s = String(value)
+  return /^[=+\-@\t\r]/.test(s) ? "'" + s : s
+}
+
 const THIN_BORDER = {
   top: { style: 'thin' },
   left: { style: 'thin' },
@@ -35,7 +42,7 @@ export function buildSettlementPreview({ month, customer, bills, template, fallb
   const categoryOrder = []
   const categoryMap = new Map()
 
-  ;(customer?.categories || []).forEach((c) => {
+  ;(Array.isArray(customer?.categories) ? customer.categories : []).forEach((c) => {
     if (c.enabled === false) return
     categoryOrder.push(c.name)
     categoryMap.set(c.name, {
@@ -76,7 +83,6 @@ export function buildSettlementPreview({ month, customer, bills, template, fallb
       if (dayIdx >= 0 && qty !== 0) {
         row.days[dayIdx] = Number((row.days[dayIdx] + qty).toFixed(3))
       }
-      row.totalQty = Number((row.totalQty + qty).toFixed(3))
       const itemPrice = Number.isFinite(price) ? price : row.price
       row.totalAmount = Number((row.totalAmount + qty * itemPrice).toFixed(2))
       if (b.status === 'verified') row.verifiedCount += 1
@@ -85,12 +91,18 @@ export function buildSettlementPreview({ month, customer, bills, template, fallb
     })
   })
 
+  // 让 totalQty 始终等于各日列之和，避免与 Excel 的 SUM(C:AG) 公式结果不一致
+  categoryOrder.forEach((name) => {
+    const r = categoryMap.get(name)
+    r.totalQty = Number(r.days.reduce((s, d) => s + d, 0).toFixed(3))
+  })
+
   const includeZero = template?.includeZeroRows !== false
   const rows = categoryOrder
     .map((name) => categoryMap.get(name))
     .filter((r) => includeZero || r.totalQty !== 0)
 
-  const activeTailCols = (template?.tailColumns || []).filter((c) => c.enabled)
+  const activeTailCols = (Array.isArray(template?.tailColumns) ? template.tailColumns : []).filter((c) => c && c.enabled)
   const grandTotal = Number(rows.reduce((s, r) => s + r.totalAmount, 0).toFixed(2))
   const grandQty = Number(rows.reduce((s, r) => s + r.totalQty, 0).toFixed(3))
   const dateParts = getMonthLastDateParts(month)
@@ -152,12 +164,12 @@ export async function exportSettlementExcel({ month, customer, bills, template, 
   }
 
   const cTitleLeft = ws.getCell(1, 1)
-  cTitleLeft.value = data.customerName
+  cTitleLeft.value = sanitizeCell(data.customerName)
   cTitleLeft.font = { name: '宋体', size: 16 }
   cTitleLeft.alignment = CENTER_ALIGN
 
   const cTitleMid = ws.getCell(1, 11)
-  cTitleMid.value = data.sheetTitle
+  cTitleMid.value = sanitizeCell(data.sheetTitle)
   cTitleMid.font = { name: '宋体', size: 18 }
   cTitleMid.alignment = CENTER_ALIGN
 
@@ -189,7 +201,7 @@ export async function exportSettlementExcel({ month, customer, bills, template, 
 
   data.activeTailCols.forEach((col, idx) => {
     const cell = ws.getCell(2, 34 + idx)
-    cell.value = col.label
+    cell.value = sanitizeCell(col.label)
     cell.font = { name: '宋体', size: 12 }
     cell.alignment = CENTER_ALIGN
   })
@@ -198,7 +210,8 @@ export async function exportSettlementExcel({ month, customer, bills, template, 
   }
 
   // ==================== 第 3 ~ (2+slotCount) 行：类目数据区（默认严格 14 行，即第 3~16 行） ====================
-  const minDataRows = Number.isInteger(template?.minDataRows) ? template.minDataRows : 14
+  // 上限钳制：损坏/恶意模板中的超大行数会让导出循环百万次导致页面卡死
+  const minDataRows = Number.isInteger(template?.minDataRows) ? Math.min(Math.max(template.minDataRows, 0), 200) : 14
   const slotCount = Math.max(minDataRows, data.rows.length)
 
   const qtyIdx = data.activeTailCols.findIndex((c) => c.key === 'totalQty')
@@ -212,7 +225,7 @@ export async function exportSettlementExcel({ month, customer, bills, template, 
     ws.mergeCells(r, 1, r, 2)
 
     const cName = ws.getCell(r, 1)
-    cName.value = item ? item.name : null
+    cName.value = item ? sanitizeCell(item.name) : null
     cName.font = { name: '宋体', size: item ? 11 : 10 }
     cName.alignment = CENTER_ALIGN
 
@@ -240,16 +253,16 @@ export async function exportSettlementExcel({ month, customer, bills, template, 
       } else if (col.key === 'totalAmount') {
         cell.value = item.totalAmount
       } else if (col.key === 'unit') {
-        cell.value = item.unit || ''
+        cell.value = sanitizeCell(item.unit || '')
       } else if (col.key === 'verifyStatus') {
         if (item.verifiedCount === 0 && item.pendingCount === 0) cell.value = ''
         else if (item.pendingCount === 0) cell.value = '已核销'
         else if (item.verifiedCount === 0) cell.value = '未核销'
         else cell.value = `已核${item.verifiedCount}/待核${item.pendingCount}`
       } else if (col.key === 'remark') {
-        cell.value = Array.from(item.remarks).join('；')
+        cell.value = sanitizeCell(Array.from(item.remarks).join('；'))
       } else {
-        cell.value = col.defaultValue || ''
+        cell.value = sanitizeCell(col.defaultValue || '')
       }
     })
 
@@ -285,7 +298,7 @@ export async function exportSettlementExcel({ month, customer, bills, template, 
   }
 
   // ==================== 第 18~20 行：原表底部 3 行空白合并行 ====================
-  const trailingBlankRows = Number.isInteger(template?.trailingBlankRows) ? template.trailingBlankRows : 3
+  const trailingBlankRows = Number.isInteger(template?.trailingBlankRows) ? Math.min(Math.max(template.trailingBlankRows, 0), 50) : 3
   for (let b = 0; b < trailingBlankRows; b++) {
     const r = nextRow + b
     ws.getRow(r).height = 24.95
@@ -297,13 +310,13 @@ export async function exportSettlementExcel({ month, customer, bills, template, 
   nextRow += trailingBlankRows
 
   // ==================== 用户自定义的底部附加状态/签字行 ====================
-  ;(template?.extraStatusFields || []).forEach((field) => {
-    if (!field.label) return
+  ;(Array.isArray(template?.extraStatusFields) ? template.extraStatusFields : []).forEach((field) => {
+    if (!field || !field.label) return
     const r = nextRow
     ws.getRow(r).height = 24.95
     ws.mergeCells(r, 1, r, Math.min(12, totalCols))
     const cell = ws.getCell(r, 1)
-    cell.value = `${field.label}：${field.value || ''}`
+    cell.value = sanitizeCell(`${field.label}：${field.value || ''}`)
     cell.font = { name: '宋体', size: 11 }
     cell.alignment = { horizontal: 'left', vertical: 'center' }
     nextRow += 1
@@ -328,17 +341,17 @@ export async function exportSettlementExcel({ month, customer, bills, template, 
     data.filteredBills.forEach((b) => {
       ;(b.items || []).forEach((it) => {
         wsDetail.addRow({
-          billNo: b.billNo,
-          date: b.date,
-          customerName: b.customerName,
-          name: it.name,
-          unit: it.unit || '',
+          billNo: sanitizeCell(b.billNo),
+          date: sanitizeCell(b.date),
+          customerName: sanitizeCell(b.customerName),
+          name: sanitizeCell(it.name),
+          unit: sanitizeCell(it.unit || ''),
           qty: Number(it.qty) || 0,
           price: Number(it.price) || 0,
           subtotal: Number(((Number(it.qty) || 0) * (Number(it.price) || 0)).toFixed(2)),
-          paymentMethod: b.paymentMethod || '月结挂账',
+          paymentMethod: sanitizeCell(b.paymentMethod || '月结挂账'),
           status: b.status === 'verified' ? '已核销' : '未核销',
-          remark: b.remark || ''
+          remark: sanitizeCell(b.remark || '')
         })
       })
     })
@@ -358,5 +371,6 @@ export async function exportSettlementExcel({ month, customer, bills, template, 
   a.href = url
   a.download = `${safeCustomer}_${month}_结算表.xlsx`
   a.click()
-  URL.revokeObjectURL(url)
+  if (typeof setTimeout === 'function') setTimeout(() => URL.revokeObjectURL(url), 1000)
+  else URL.revokeObjectURL(url)
 }

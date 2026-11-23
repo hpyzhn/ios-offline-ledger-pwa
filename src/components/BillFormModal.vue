@@ -2,8 +2,14 @@
 import { ref, computed, watch } from 'vue'
 import { numberToChineseRMB, formatMoney } from '../utils/rmb'
 
+function formatLocalDate(d = new Date()) {
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
 const props = defineProps({
   visible: Boolean,
+  saving: Boolean,
   customers: Array,
   products: Array,
   editingBill: Object,
@@ -32,7 +38,7 @@ function buildRowsForCustomer(custName, existingItems = []) {
   const existingMap = new Map(existingItems.map((i) => [i.name, i]))
 
   const baseList =
-    cust && cust.categories?.length
+    cust && Array.isArray(cust.categories) && cust.categories.length
       ? cust.categories.filter((c) => c.enabled !== false)
       : (props.products || []).map((p) => ({ name: p.name, unit: p.unit, price: p.defaultPrice }))
 
@@ -77,7 +83,7 @@ watch(
     } else {
       const initName = props.defaultCustomerName || props.customers?.[0]?.name || ''
       selectedCustomerName.value = initName
-      date.value = props.defaultDate || new Date().toISOString().slice(0, 10)
+      date.value = props.defaultDate || formatLocalDate()
       paymentMethod.value = '月结挂账'
       status.value = 'pending'
       remark.value = ''
@@ -98,10 +104,12 @@ function handleQuickAddCategory() {
   if (entryRows.value.some((r) => r.name === name)) {
     return alert('该类目已在列表中')
   }
+  const price = Number(newCatPrice.value)
+  if (!Number.isFinite(price) || price < 0) return alert('单价必须是有效的非负数')
   const newItem = {
     name,
     unit: newCatUnit.value.trim() || '条',
-    price: Number(newCatPrice.value) || 0,
+    price,
     qty: ''
   }
   entryRows.value.push(newItem)
@@ -119,7 +127,7 @@ function handleQuickAddCategory() {
 
 const filledItems = computed(() =>
   entryRows.value
-    .filter((r) => Number(r.qty) > 0)
+    .filter((r) => Number.isFinite(Number(r.qty)) && Number(r.qty) > 0)
     .map((r) => ({
       name: r.name,
       unit: r.unit,
@@ -133,13 +141,21 @@ const totalAmount = computed(() =>
 )
 
 function handleSubmit() {
+  // 保存进行中时禁止重复提交，防止并发写入产生重复账单
+  if (props.saving) return
   if (!selectedCustomerName.value) return alert('请先选择合作商家/客户')
-  if (!date.value) return alert('请选择日期')
+  if (!date.value || !/^\d{4}-\d{2}-\d{2}$/.test(date.value)) return alert('请选择有效日期')
   if (filledItems.value.length === 0) return alert('请至少为一个类目填写大于 0 的数量')
+  if (filledItems.value.some((i) => !Number.isFinite(i.price) || i.price < 0)) {
+    return alert('单价必须是有效的非负数，请先在客户设置中修正类目单价')
+  }
+  if (!Number.isFinite(totalAmount.value)) return alert('数量或单价超出有效范围，请检查输入')
 
   emit('save', {
     id: props.editingBill?.id,
     billNo: props.editingBill?.billNo,
+    // 乐观并发控制基线：保存时与库内最新 updatedAt 比对，防止覆盖其他窗口/设备的修改
+    baseUpdatedAt: props.editingBill?.updatedAt,
     customerName: selectedCustomerName.value,
     date: date.value,
     month: date.value.slice(0, 7),
@@ -273,7 +289,9 @@ function handleSubmit() {
       </div>
 
       <div class="modal-footer">
-        <button class="btn-block btn-primary" @click="handleSubmit">保存本地账单</button>
+        <button class="btn-block btn-primary" :disabled="saving" @click="handleSubmit">
+          {{ saving ? '正在保存...' : '保存本地账单' }}
+        </button>
       </div>
     </div>
   </div>

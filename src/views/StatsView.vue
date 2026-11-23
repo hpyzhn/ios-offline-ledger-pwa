@@ -45,14 +45,23 @@ const preview = computed(() =>
   })
 )
 
+const exporting = ref(false)
 async function handleExport() {
-  await exportSettlementExcel({
-    month: props.month,
-    customer: currentCustomer.value,
-    bills: props.bills,
-    template: currentTemplate.value,
-    fallbackTitle: props.settings?.companyName
-  })
+  if (exporting.value) return
+  exporting.value = true
+  try {
+    await exportSettlementExcel({
+      month: props.month,
+      customer: currentCustomer.value,
+      bills: props.bills,
+      template: currentTemplate.value,
+      fallbackTitle: props.settings?.companyName
+    })
+  } catch (err) {
+    alert('导出失败：' + (err?.message || err))
+  } finally {
+    exporting.value = false
+  }
 }
 
 function onSaveTemplate(payload) {
@@ -92,8 +101,8 @@ function onSaveTemplate(payload) {
     <div style="padding: 12px; display: flex; flex-direction: column; gap: 12px;">
       <!-- 导出与定制模板操作条 -->
       <div style="display:flex;gap:8px;">
-        <button class="btn-block btn-primary" style="flex:1.6;" @click="handleExport">
-          导出结算表 Excel (.xlsx)
+        <button class="btn-block btn-primary" style="flex:1.6;" :disabled="exporting" @click="handleExport">
+          {{ exporting ? '正在导出...' : '导出结算表 Excel (.xlsx)' }}
         </button>
         <button class="btn-block btn-secondary" style="flex:1;" @click="showTemplateEditor = true">
           定制输出格式
