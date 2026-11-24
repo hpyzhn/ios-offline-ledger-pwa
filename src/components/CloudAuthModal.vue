@@ -1,6 +1,6 @@
 <script setup>
 import { ref, watch } from 'vue'
-import { db, cloudConfigured, getActiveCloudUrl, setSavedCloudUrl } from '../db/database'
+import { db, cloudConfigured, getActiveCloudUrl, localLedgerOnly, setSavedCloudUrl } from '../db/database'
 
 const props = defineProps({
   visible: Boolean,
@@ -32,7 +32,13 @@ function handleSaveUrl() {
     return alert('云数据库地址无效：仅支持 https://xxxx.dexie.cloud 形式的 Dexie Cloud 官方地址')
   }
   alert(clean ? '云同步地址已保存，页面将自动刷新生效' : '已清除云同步地址，将切回纯本地模式')
-  window.location.reload()
+  if (localLedgerOnly) {
+    const url = new URL(window.location.href)
+    url.searchParams.delete('ledger')
+    window.location.replace(url.href)
+  } else {
+    window.location.reload()
+  }
 }
 
 async function handleLogin() {

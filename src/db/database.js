@@ -46,7 +46,8 @@ db.version(2).stores({
   settings: 'key'
 })
 
-export const cloudConfigured = Boolean(getActiveCloudUrl())
+export const localLedgerOnly = new URLSearchParams(location.search).get('ledger') === 'local'
+export const cloudConfigured = !localLedgerOnly && Boolean(getActiveCloudUrl())
 
 if (cloudConfigured) {
   db.cloud.configure({
