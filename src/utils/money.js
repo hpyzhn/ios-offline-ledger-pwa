@@ -1,3 +1,11 @@
+export function hasNamedBillItems(items) {
+  if (!Array.isArray(items)) return false
+  for (const item of items) {
+    if (typeof item?.name !== 'string' || !item.name.trim()) return false
+  }
+  return true
+}
+
 export function billTotal(items) {
   return Number(items.reduce((sum, item) => sum + Number(item.qty) * Number(item.price), 0).toFixed(2))
 }

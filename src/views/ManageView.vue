@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
+import { version } from '../../package.json'
 
 const props = defineProps({
   customers: Array,
@@ -72,7 +73,7 @@ function addCategoryToCustomer() {
   if (!name) return alert('请输入类目名称')
   const price = Number(catPrice.value)
   if (!Number.isFinite(price) || price < 0) return alert('单价必须是有效的非负数')
-  if ((Array.isArray(activeCustomer.value.categories) ? activeCustomer.value.categories : []).some((c) => c.name === name)) return alert('该客户已存在同名类目')
+  if ((Array.isArray(activeCustomer.value.categories) ? activeCustomer.value.categories : []).some((c) => c?.name === name)) return alert('该客户已存在同名类目')
   emit('updateCustomerCategories', {
     customerId: activeCustomer.value.id,
     op: 'add',
@@ -217,22 +218,25 @@ function onFileChange(e) {
         </button>
 
         <div
-          v-for="(cat, idx) in activeCustomer.categories"
-          :key="cat.name"
+          v-for="(cat, idx) in (Array.isArray(activeCustomer.categories) ? activeCustomer.categories : [])"
+          :key="idx"
           style="display:flex;align-items:center;gap:6px;padding:8px 0;border-bottom:1px solid #F3F4F6;"
         >
-          <div style="flex:1.2;font-weight:600;">{{ cat.name }} <span style="font-weight:400;color:#7F848A;font-size:12px;">({{ cat.unit }})</span></div>
-          <input
-            type="number"
-            step="any"
-            class="form-control"
-            style="width:78px;padding:5px 6px;"
-            :value="cat.price"
-            @change="updateCategoryPrice(idx, $event.target.value)"
-          />
-          <button class="btn-sm" @click="moveCategory(idx, -1)">↑</button>
-          <button class="btn-sm" @click="moveCategory(idx, 1)">↓</button>
-          <button class="btn-sm danger" @click="removeCategoryFromCustomer(idx)">删</button>
+          <span v-if="!cat?.name">第 {{ idx + 1 }} 项类目格式异常</span>
+          <template v-else>
+            <div style="flex:1.2;font-weight:600;">{{ cat.name }} <span style="font-weight:400;color:#7F848A;font-size:12px;">({{ cat.unit }})</span></div>
+            <input
+              type="number"
+              step="any"
+              class="form-control"
+              style="width:78px;padding:5px 6px;"
+              :value="cat.price"
+              @change="updateCategoryPrice(idx, $event.target.value)"
+            />
+            <button class="btn-sm" @click="moveCategory(idx, -1)">↑</button>
+            <button class="btn-sm" @click="moveCategory(idx, 1)">↓</button>
+            <button class="btn-sm danger" @click="removeCategoryFromCustomer(idx)">删</button>
+          </template>
         </div>
       </div>
 
@@ -264,6 +268,7 @@ function onFileChange(e) {
           </label>
         </div>
       </div>
+      <small style="text-align:center;color:#7F848A;">应用版本 {{ version }}</small>
     </div>
   </div>
 </template>

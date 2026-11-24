@@ -1,6 +1,6 @@
 import ExcelJS from 'exceljs'
-import { getMonthLastDateParts } from './rmb'
-import { allocateBillCents } from './money.js'
+import { getMonthLastDateParts } from './rmb.js'
+import { allocateBillCents, hasNamedBillItems } from './money.js'
 
 function colToLetter(colNum1Based) {
   let s = ''
@@ -29,29 +29,47 @@ const THIN_BORDER = {
 
 const CENTER_ALIGN = { horizontal: 'center', vertical: 'center' }
 
+function ledgerNumber(value) {
+  if (typeof value !== 'number' && !(typeof value === 'string' && value.trim())) return NaN
+  return Number(value)
+}
+
 /**
  * 计算月度 1~31 日横向矩阵数据（用于页面实时预览与 Excel 导出）
  */
 export function buildSettlementPreview({ month, customer, bills, template, fallbackTitle }) {
+  if (typeof customer?.name !== 'string' || !customer.name.trim()) throw new Error('请选择要结算的客户。')
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error('请选择有效的结算月份。')
+  const dateParts = getMonthLastDateParts(month)
   const statusFilter = template?.statusFilter || 'all'
+  if (!['all', 'pending', 'verified'].includes(statusFilter)) {
+    throw new Error('模板中的账单状态范围无效，请在「定制输出格式」中重新选择。')
+  }
   const filteredBills = (bills || []).filter((b) => {
-    if (customer && b.customerName !== customer.name) return false
-    if (statusFilter !== 'all' && b.status !== statusFilter) return false
+    if (b?.customerName !== customer.name) return false
+    if (b.month && b.month !== month) return false
+    if (statusFilter !== 'all' && (b.status || 'pending') !== statusFilter) return false
     return true
   })
 
   const categoryOrder = []
   const categoryMap = new Map()
+  const categoryPrices = new Map()
   const details = []
 
   ;(Array.isArray(customer?.categories) ? customer.categories : []).forEach((c) => {
-    if (c.enabled === false) return
+    if (typeof c?.name !== 'string' || !c.name.trim()) return
     if (categoryMap.has(c.name)) return
+    const price = ledgerNumber(c.price)
+    if (Number.isFinite(price) && (c.enabled !== false || !categoryPrices.has(c.name))) {
+      categoryPrices.set(c.name, price)
+    }
+    if (c.enabled === false) return
     categoryOrder.push(c.name)
     categoryMap.set(c.name, {
       name: c.name,
       unit: c.unit || '',
-      price: Number(c.price) || 0,
+      price: categoryPrices.get(c.name) ?? 0,
       days: Array(31).fill(0),
       totalQty: 0,
       totalAmount: 0,
@@ -62,15 +80,24 @@ export function buildSettlementPreview({ month, customer, bills, template, fallb
   })
 
   filteredBills.forEach((b) => {
-    const dayNum = Number((b.date || '').slice(8, 10))
-    const dayIdx = dayNum >= 1 && dayNum <= 31 ? dayNum - 1 : -1
-
-    const items = (b.items || []).map(item => ({
-      ...item,
-      qty: Number(item.qty) || 0,
-      price: Number.isFinite(Number(item.price)) ? Number(item.price) : categoryMap.get(item.name)?.price || 0
-    }))
-    const amounts = allocateBillCents(items, Number.isFinite(b.totalAmount) ? b.totalAmount : undefined)
+    function invalid(reason) {
+      throw new Error(`账单「${b.billNo || b.id || b.date || '未知'}」${reason}，请核对原始单据。`)
+    }
+    const day = typeof b.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(b.date) ? Number(b.date.slice(8)) : 0
+    if (!day || day > dateParts.day || b.date.slice(0, 7) !== month) invalid('的日期与结算月份不符')
+    if (!hasNamedBillItems(b.items)) invalid('的明细格式异常')
+    const savedTotal = b.totalAmount == null ? undefined : ledgerNumber(b.totalAmount)
+    if (savedTotal !== undefined && (savedTotal < 0 || !Number.isSafeInteger(Math.round(savedTotal * 100)))) invalid('的已存金额无效')
+    if (!b.items.length && savedTotal) invalid('有金额但缺少明细')
+    const items = b.items.map(item => {
+      const qty = ledgerNumber(item.qty)
+      const price = item.price == null ? categoryPrices.get(item.name) : ledgerNumber(item.price)
+      if (!Number.isFinite(qty) || qty < 0 || !Number.isFinite(price) || price < 0) invalid(`的「${item.name}」数量或单价无效`)
+      if (!Number.isSafeInteger(Math.round(qty * price * 100))) invalid('的明细金额超出有效范围')
+      return { ...item, qty, price }
+    })
+    const amounts = allocateBillCents(items, savedTotal)
+    if (!amounts.every(Number.isSafeInteger)) invalid('的金额超出有效范围')
     details.push({ bill: b, items, amounts })
     items.forEach((it, index) => {
       if (!categoryMap.has(it.name)) {
@@ -88,10 +115,7 @@ export function buildSettlementPreview({ month, customer, bills, template, fallb
         })
       }
       const row = categoryMap.get(it.name)
-      const qty = Number(it.qty) || 0
-      if (dayIdx >= 0 && qty !== 0) {
-        row.days[dayIdx] = Number((row.days[dayIdx] + qty).toFixed(3))
-      }
+      row.days[day - 1] = Number((row.days[day - 1] + it.qty).toFixed(3))
       row.totalAmount = (Math.round(row.totalAmount * 100) + amounts[index]) / 100
       if (b.status === 'verified') row.verifiedCount += 1
       else row.pendingCount += 1
@@ -113,11 +137,13 @@ export function buildSettlementPreview({ month, customer, bills, template, fallb
   const activeTailCols = (Array.isArray(template?.tailColumns) ? template.tailColumns : []).filter((c) => c && c.enabled)
   const grandTotal = Number(rows.reduce((s, r) => s + r.totalAmount, 0).toFixed(2))
   const grandQty = Number(rows.reduce((s, r) => s + r.totalQty, 0).toFixed(3))
-  const dateParts = getMonthLastDateParts(month)
+  if (!Number.isSafeInteger(Math.round(grandTotal * 100)) || !Number.isFinite(grandQty)) {
+    throw new Error('本月合计超出有效范围，请核对账单。')
+  }
 
   return {
     filteredBills,
-    customerName: customer?.name || '留香东江酒店',
+    customerName: customer.name,
     sheetTitle: template?.sheetTitle || fallbackTitle || '广州市羽洁洗涤厂结算表',
     settlementDate: dateParts.text,
     settlementDateObj: dateParts.dateObj,
@@ -295,7 +321,7 @@ export async function exportSettlementExcel({ month, customer, bills, template, 
       const aCol = 34 + amountIdx
       const aLet = colToLetter(aCol)
       const cTotal = ws.getCell(r, aCol)
-      cTotal.value = { formula: `SUM(${aLet}3:${aLet}${2 + slotCount})`, result: data.grandTotal }
+      cTotal.value = slotCount ? { formula: `SUM(${aLet}3:${aLet}${2 + slotCount})`, result: data.grandTotal } : 0
       cTotal.font = { name: '宋体', size: 12 }
       cTotal.alignment = CENTER_ALIGN
     }

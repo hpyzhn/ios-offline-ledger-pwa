@@ -81,24 +81,42 @@ const pendingSyncCount = ref(0)
 const syncBanner = ref('')
 
 let loadDataSeq = 0
+const loadedMonth = ref(null)
+const loadError = ref('')
 async function loadData() {
   const seq = ++loadDataSeq
   const month = currentMonth.value
-  const [custs, prods, monthBills, profile, pendingCount] = await Promise.all([
-    db.customers.toArray(),
-    db.products.toArray(),
-    db.bills.where('month').equals(month).sortBy('date'),
-    getSettings(),
-    db.bills.where('syncStatus').equals('pending').count()
-  ])
-  // 序号守卫：丢弃过期的慢请求结果，防止旧月份/旧快照覆盖新数据
-  if (seq !== loadDataSeq) return
-  // 历史版本可能写入了多份完全相同的演示记录。保留库内数据和不同的客户模板。
-  customers.value = [...new Map(custs.map(c => [JSON.stringify([c.name, c.categories, c.exportTemplate]), c])).values()]
-  products.value = prods.length ? [...new Map(prods.map(p => [JSON.stringify([p.name, p.unit, p.defaultPrice]), p])).values()] : DEFAULT_PRODUCTS
-  bills.value = monthBills
-  settings.value = profile
-  pendingSyncCount.value = pendingCount
+  loadedMonth.value = null
+  loadError.value = ''
+  try {
+    // 云同步可同时替换客户、模板和账单；同一只读事务内取一致的快照。
+    const [custs, prods, monthBills, profile, pendingCount] = await db.transaction(
+      'r', db.customers, db.products, db.bills, db.settings, () => Promise.all([
+        db.customers.toArray(),
+        db.products.toArray(),
+        db.bills.where('month').equals(month).sortBy('date'),
+        getSettings(),
+        db.bills.where('syncStatus').equals('pending').count()
+      ])
+    )
+    if (seq !== loadDataSeq) return
+    // 历史版本可能写入了多份完全相同的演示记录。保留库内数据和不同的客户模板。
+    customers.value = [...new Map(custs.map(c => [JSON.stringify([c.name, c.categories, c.exportTemplate]), c])).values()]
+    products.value = prods.length ? [...new Map(prods.map(p => [JSON.stringify([p.name, p.unit, p.defaultPrice]), p])).values()] : DEFAULT_PRODUCTS
+    bills.value = monthBills
+    settings.value = profile
+    pendingSyncCount.value = pendingCount
+    loadedMonth.value = month
+  } catch (err) {
+    if (seq !== loadDataSeq) return
+    loadError.value = '账本读取失败：' + (err?.message || err)
+    throw err
+  }
+}
+
+function refreshView() {
+  // loadData 已将读取失败原因和重试入口交给结算页。
+  loadData().catch(() => {})
 }
 
 // 联网后自动检测本地是否有未同步的离线数据，并自动上传至云盘
@@ -154,7 +172,7 @@ async function autoCheckAndUploadOfflineData(manual = false) {
   }
 }
 
-watch(currentMonth, loadData)
+watch(currentMonth, refreshView)
 
 function syncOnline() {
   isOnline.value = navigator.onLine
@@ -177,7 +195,7 @@ let subSync = null
 let subComplete = null
 
 onMounted(() => {
-  loadData()
+  refreshView()
   window.addEventListener('online', syncOnline)
   window.addEventListener('offline', syncOnline)
 
@@ -328,7 +346,7 @@ async function handleConfirmSmartImport(records) {
           const list = Array.isArray(cust.categories) ? [...cust.categories] : []
           let changed = false
           rec.items.forEach((it) => {
-            if (!list.some((c) => c.name === it.name)) {
+            if (!list.some((c) => c?.name === it.name)) {
               list.push({ name: it.name, unit: it.unit || '条', price: Number(it.price) || 0, enabled: true })
               changed = true
             }
@@ -496,7 +514,7 @@ async function handleQuickAddCategory({ customerName, category }) {
       const cust = await db.customers.where('name').equals(customerName).first()
       if (!cust) return
       const list = Array.isArray(cust.categories) ? [...cust.categories] : []
-      if (list.some((c) => c.name === category.name)) return
+      if (list.some((c) => c?.name === category.name)) return
       list.push({ ...category, name: category.name.trim(), price: Number(category.price) })
       await db.customers.update(cust.id, { categories: list })
     })
@@ -543,7 +561,7 @@ async function handleUpdateCustomerCategories({ customerId, op, category, index,
       const list = Array.isArray(cust.categories) ? [...cust.categories] : []
       if (op === 'add') {
         if (!category || !category.name) throw new Error('类目数据无效')
-        if (list.some((c) => c.name === category.name)) throw new Error('该客户已存在同名类目')
+        if (list.some((c) => c?.name === category.name)) throw new Error('该客户已存在同名类目')
         list.push(category)
       } else if (op === 'updatePrice') {
         if (!list[index]) throw new Error('该类目已被其他窗口删除，请刷新后重试')
@@ -756,6 +774,9 @@ async function handlePendingTransfer() {
       :bills="bills"
       :customers="customers"
       :settings="settings"
+      :loading="loadedMonth !== currentMonth"
+      :load-error="loadError"
+      @retry="refreshView"
       @save-customer-template="handleSaveCustomerTemplate"
     />
 
@@ -837,7 +858,7 @@ async function handlePendingTransfer() {
       :sync-state="syncState"
       :apply-transfer="handlePendingTransfer"
       @close="showAuthModal = false"
-      @synced="loadData"
+      @synced="refreshView"
     />
   </div>
 </template>

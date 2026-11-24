@@ -36,6 +36,11 @@ jobs:
           npm run build
           test -f dist/index.html
 
+      - name: Test settlement on mobile Chromium and WebKit
+        run: |
+          npx --no-install playwright install --with-deps --only-shell chromium webkit
+          npm run test:browser
+
       # 手动重跑工作流时会残留上一次尝试的 github-pages 产物，
       # 重名会导致后续部署报 "Multiple artifacts named github-pages"，
       # 因此上传前先清理本运行中的旧产物。

@@ -65,10 +65,13 @@ npm run preview # 本地预览构建产物
 ## 🧪 测试
 
 ```bash
-node --test tests/*.test.mjs
+npm test
+npx playwright install chromium webkit
+npm run build
+npm run test:browser
 ```
 
-覆盖云启动与同步重试、解析、Excel 金额、并发冲突、备份合并和管理员口令迁移等用例。
+浏览器测试在独立的本地账本上操作生产构建，覆盖移动 WebKit 和 Chromium 的结算、Excel 下载、异常账单纠错和断网重开。云账号和同步响应由测试程序在内存中模拟。
 
 ## 📦 部署
 

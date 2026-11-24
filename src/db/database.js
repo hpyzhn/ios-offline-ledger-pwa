@@ -136,6 +136,27 @@ export function createDefaultExportTemplate(sheetTitle = '广州市羽洁洗涤�
   }
 }
 
+// 旧模板可能只保存了修改过的字段。只对展示格式补默认值，不改写客户档案。
+export function readExportTemplate(customer, defaultTitle) {
+  const defaults = createDefaultExportTemplate(typeof defaultTitle === 'string' && defaultTitle.trim() ? defaultTitle : undefined)
+  const saved = customer?.exportTemplate
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return defaults
+  return {
+    ...defaults,
+    ...saved,
+    sheetTitle: typeof saved.sheetTitle === 'string' && saved.sheetTitle.trim() ? saved.sheetTitle : defaults.sheetTitle,
+    tailColumns: Array.isArray(saved.tailColumns)
+      ? saved.tailColumns
+        .filter(col => typeof col?.key === 'string' && col.key)
+        .map(col => ({ ...defaults.tailColumns.find(base => base.key === col.key), ...col }))
+        .filter(col => typeof col.label === 'string')
+      : defaults.tailColumns,
+    extraStatusFields: Array.isArray(saved.extraStatusFields)
+      ? saved.extraStatusFields.filter(field => typeof field?.label === 'string')
+      : []
+  }
+}
+
 export const DEFAULT_SETTINGS = {
   companyName: '广州市羽洁洗涤厂结算表',
   handlerName: '经手人'

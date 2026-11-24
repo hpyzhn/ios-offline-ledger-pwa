@@ -1,4 +1,4 @@
-import { billTotal, allocateBillCents } from '../src/utils/money.js'
+import { billTotal, allocateBillCents, hasNamedBillItems } from '../src/utils/money.js'
 import { createLedgerBackup, planLedgerMerge } from '../src/db/ledgerBackup.js'
 import { makeDeviceDb, credentialFields } from './device-fixture.mjs'
 import { test } from 'node:test'
@@ -211,7 +211,7 @@ test('category index ops carry name guard against concurrent reordering', async 
 function excelContext() {
   const state = { output: null }
   const context = vm.createContext({
-    ExcelJS, getMonthLastDateParts, allocateBillCents, Blob,
+    ExcelJS, getMonthLastDateParts, allocateBillCents, hasNamedBillItems, Blob,
     URL: { createObjectURL(blob) { state.output = blob; return 'blob:test' }, revokeObjectURL() {} },
     document: { createElement: () => ({ click() {} }) }
   })
@@ -233,6 +233,17 @@ test('detail sheet sanitizes billNo and paymentMethod formula payloads', async (
   assert(String(row.getCell(1).value).startsWith("'"))
   assert(String(row.getCell(9).value).startsWith("'"))
   assert.equal(row.getCell(2).value, '2026-11-21')
+})
+
+test('export without categories or padding writes a zero total, not a circular formula', async () => {
+  const { context, state } = excelContext()
+  await context.exportSettlementExcel({
+    month: '2024-02', customer: { name: '甲' }, bills: [],
+    template: { minDataRows: 0, tailColumns: [{ key: 'totalAmount', label: '总额', enabled: true }] }
+  })
+  const wb = new ExcelJS.Workbook()
+  await wb.xlsx.load(await state.output.arrayBuffer())
+  assert.equal(wb.worksheets[0].getCell('AH3').value, 0)
 })
 
 test('export clamps absurd template row counts instead of freezing', async () => {

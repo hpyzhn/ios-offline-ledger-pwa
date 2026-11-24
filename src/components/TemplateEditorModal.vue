@@ -1,6 +1,6 @@
 <script setup>
 import { ref, watch } from 'vue'
-import { createDefaultExportTemplate } from '../db/database'
+import { createDefaultExportTemplate, readExportTemplate } from '../db/database'
 
 const props = defineProps({
   visible: Boolean,
@@ -20,14 +20,7 @@ watch(
   () => props.visible,
   (open) => {
     if (!open || !props.customer) return
-    const src = props.customer.exportTemplate || createDefaultExportTemplate(props.defaultTitle)
-    draft.value = JSON.parse(JSON.stringify(src))
-    if (!Array.isArray(draft.value.tailColumns)) {
-      draft.value.tailColumns = createDefaultExportTemplate(props.defaultTitle).tailColumns
-    }
-    if (!Array.isArray(draft.value.extraStatusFields)) {
-      draft.value.extraStatusFields = []
-    }
+    draft.value = JSON.parse(JSON.stringify(readExportTemplate(props.customer, props.defaultTitle)))
   }
 )
 

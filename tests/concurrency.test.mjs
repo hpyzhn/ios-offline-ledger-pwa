@@ -1,4 +1,4 @@
-import { billTotal } from '../src/utils/money.js'
+import { billTotal, hasNamedBillItems } from '../src/utils/money.js'
 import { createLedgerBackup, planLedgerMerge } from '../src/db/ledgerBackup.js'
 import { makeDeviceDb, credentialFields } from './device-fixture.mjs'
 import { test } from 'node:test'
@@ -285,7 +285,7 @@ test('restore rejects invalid backup before clearing any data', async () => {
 
 function adminContext(db) {
   return vm.createContext({
-    db, billTotal, ref: v => ({ value: v }), computed: fn => ({ get value() { return fn() } }),
+    db, billTotal, hasNamedBillItems, ref: v => ({ value: v }), computed: fn => ({ get value() { return fn() } }),
     watch() {}, defineProps: () => ({}), defineEmits: () => () => {}, alert() {}
   })
 }

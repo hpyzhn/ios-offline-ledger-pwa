@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { formatMoney } from '../utils/rmb'
+import { hasNamedBillItems } from '../utils/money.js'
 import FilterDrawer from '../components/FilterDrawer.vue'
 
 const props = defineProps({
@@ -26,10 +27,10 @@ const filteredBills = computed(() => {
     if (statusFilter.value !== 'all' && b.status !== statusFilter.value) return false
     if (keyword.value.trim()) {
       const q = keyword.value.trim().toLowerCase()
-      const hitCust = (b.customerName || '').toLowerCase().includes(q)
-      const hitNo = (b.billNo || '').toLowerCase().includes(q)
-      const hitRemark = (b.remark || '').toLowerCase().includes(q)
-      const hitItem = (b.items || []).some((i) => (i.name || '').toLowerCase().includes(q))
+      const hitCust = String(b.customerName || '').toLowerCase().includes(q)
+      const hitNo = String(b.billNo || '').toLowerCase().includes(q)
+      const hitRemark = String(b.remark || '').toLowerCase().includes(q)
+      const hitItem = Array.isArray(b.items) && b.items.some(i => typeof i?.name === 'string' && i.name.toLowerCase().includes(q))
       if (!hitCust && !hitNo && !hitRemark && !hitItem) return false
     }
     return true
@@ -139,19 +140,22 @@ function onSelectCustomer(name) {
         </div>
 
         <div class="bill-items-preview">
-          <div v-for="(it, idx) in bill.items" :key="idx">
-            {{ it.name }}：{{ it.qty }}{{ it.unit }} × ¥{{ it.price }} = <strong>¥{{ formatMoney(it.qty * it.price) }}</strong>
-          </div>
+          <template v-if="hasNamedBillItems(bill.items)">
+            <div v-for="(it, idx) in bill.items" :key="idx">
+              {{ it.name }}：{{ it.qty }}{{ it.unit }} × ¥{{ it.price }} = <strong>¥{{ formatMoney(it.qty * it.price) }}</strong>
+            </div>
+          </template>
+          <div v-else>这笔账单的明细格式异常，请对照原始单据使用「管理员纠错」。</div>
           <div v-if="bill.remark" style="color:#6B7280;margin-top:4px;">备注：{{ bill.remark }}</div>
         </div>
 
         <div class="bill-actions">
-          <button class="btn-sm primary" @click="emit('preview', bill)">电子单据</button>
+          <button class="btn-sm primary" :disabled="!hasNamedBillItems(bill.items)" @click="emit('preview', bill)">电子单据</button>
           <button class="btn-sm" @click="emit('toggleVerify', bill)">
             {{ bill.status === 'verified' ? '撤回核销' : '核销' }}
           </button>
           <button
-            v-if="bill.status !== 'verified'"
+            v-if="bill.status !== 'verified' && hasNamedBillItems(bill.items)"
             class="btn-sm"
             @click="emit('edit', bill)"
           >

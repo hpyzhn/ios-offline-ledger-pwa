@@ -1,4 +1,4 @@
-import { billTotal, allocateBillCents } from '../src/utils/money.js'
+import { billTotal, allocateBillCents, hasNamedBillItems } from '../src/utils/money.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -20,7 +20,7 @@ test('smart parser loads and preserves explicit prices', () => {
 
 test('export preserves historical and zero prices in actual workbook', async () => {
   let output
-  const context = vm.createContext({ ExcelJS, getMonthLastDateParts, allocateBillCents,
+  const context = vm.createContext({ ExcelJS, getMonthLastDateParts, allocateBillCents, hasNamedBillItems,
     Blob, URL: { createObjectURL(blob) { output = blob; return 'blob:test' }, revokeObjectURL() {} },
     document: { createElement: () => ({ click() {} }) }
   })
@@ -70,7 +70,7 @@ test('admin total uses saved rows and audit failure rolls back bill', async () =
     auditLogs: { add: async () => { if (fail) throw Error('audit failure') }, orderBy: () => ({ reverse: () => ({ limit: () => ({ toArray: async () => [] }) }) }) },
     transaction: async (...args) => { const before = structuredClone(bill); try { await args.at(-1)() } catch(e) { bill = before; throw e } }
   }
-  const context = vm.createContext({db, billTotal, ref: value => ({value}), computed: fn => ({get value(){return fn()}}), watch(){}, defineProps:()=>({}), defineEmits:()=>()=>{}, alert(){}})
+  const context = vm.createContext({db, billTotal, hasNamedBillItems, ref: value => ({value}), computed: fn => ({get value(){return fn()}}), watch(){}, defineProps:()=>({}), defineEmits:()=>()=>{}, alert(){}})
   vm.runInContext(script('../src/components/AdminPanelModal.vue'), context)
   vm.runInContext(`editingOrder.value = {id:'old',totalAmount:10,items:[]}; editItems.value = [{name:'Cloth',qty:10,price:2},{name:'',qty:5,price:100}]; editReason.value = 'correction'`, context)
   await assert.rejects(context.saveOrderFix(), /audit failure/)
@@ -86,6 +86,26 @@ function appContext(db) {
     navigator: {onLine:true}, cloudConfigured:true, alert(){}, setTimeout(){},
     createDefaultExportTemplate:()=>({}), generateNextBillNo:async()=>webcrypto.randomUUID() })
 }
+
+test('a late month read or failure cannot replace the latest settlement snapshot', async () => {
+  const reads = []
+  const db = { transaction: () => new Promise((resolve, reject) => reads.push({ resolve, reject })) }
+  const ctx = appContext(db)
+  vm.runInContext(script('../src/App.vue'), ctx)
+  const january = vm.runInContext("currentMonth.value = '2024-01'; loadData()", ctx)
+  const february = vm.runInContext("currentMonth.value = '2024-02'; loadData()", ctx)
+  const march = vm.runInContext("currentMonth.value = '2024-03'; loadData()", ctx)
+  const snapshot = month => [[{ id: 'a', name: '甲' }], [{ name: '布' }], [{ month }], {}, 0]
+  assert.equal(vm.runInContext('loadedMonth.value', ctx), null)
+  reads[2].resolve(snapshot('2024-03'))
+  await march
+  reads[0].resolve(snapshot('2024-01'))
+  reads[1].reject(new Error('stale read'))
+  await Promise.all([january, february])
+  assert.equal(vm.runInContext('loadedMonth.value', ctx), '2024-03')
+  assert.equal(vm.runInContext('bills.value[0].month', ctx), '2024-03')
+  assert.equal(vm.runInContext('loadError.value', ctx), '')
+})
 
 test('failed upload leaves pending; edits during upload are not acknowledged', async () => {
   let bill = {id:'existing', syncStatus:'pending', updatedAt:1, totalAmount:10}

@@ -1,5 +1,5 @@
 <script setup>
-import { billTotal } from '../utils/money.js'
+import { billTotal, hasNamedBillItems } from '../utils/money.js'
 import { ref, computed, watch } from 'vue'
 import { db, verifyAdminPin, changeAdminPin, getAdminPinLockStatus, isAdminPinDefault } from '../db/database'
 import { formatMoney, numberToChineseRMB } from '../utils/rmb'
@@ -101,20 +101,21 @@ const filteredOrders = computed(() => {
   if (!q) return allBills.value
   return allBills.value.filter(
     (b) =>
-      (b.customerName || '').toLowerCase().includes(q) ||
-      (b.billNo || '').toLowerCase().includes(q) ||
-      (b.date || '').includes(q) ||
-      (b.items || []).some((i) => (i.name || '').toLowerCase().includes(q))
+      String(b.customerName || '').toLowerCase().includes(q) ||
+      String(b.billNo || '').toLowerCase().includes(q) ||
+      String(b.date || '').includes(q) ||
+      (Array.isArray(b.items) && b.items.some(i => typeof i?.name === 'string' && i.name.toLowerCase().includes(q)))
   )
 })
 
 function openOrderFix(bill) {
   editingOrder.value = bill
-  editItems.value = (bill.items || []).map((i) => ({
-    name: i.name,
-    unit: i.unit || '条',
-    qty: Number(i.qty) || 0,
-    price: Number(i.price) || 0
+  const rows = Array.isArray(bill.items) && bill.items.length ? bill.items : [null]
+  editItems.value = Array.from(rows, i => ({
+    name: typeof i?.name === 'string' ? i.name : '',
+    unit: typeof i?.unit === 'string' && i.unit ? i.unit : '条',
+    qty: i?.qty ?? '',
+    price: i?.price ?? ''
   }))
   editStatus.value = bill.status || 'pending'
   editRemark.value = bill.remark || ''
@@ -143,6 +144,11 @@ async function saveOrderFix() {
   if (savingFix.value) return
   savingFix.value = true
   try {
+    const oldBill = editingOrder.value
+    const brokenDetails = !hasNamedBillItems(oldBill.items)
+    if (brokenDetails && editItems.value.some(i => !i.name.trim() || i.qty === '' || i.price === '')) {
+      return alert('原账单含异常明细，请按原始单据补全每一行，或明确删除多余行')
+    }
     if (editItems.value.some(i => !Number.isFinite(Number(i.qty)) || !Number.isFinite(Number(i.price)) || Number(i.qty) < 0 || Number(i.price) < 0)) {
       return alert('数量和单价必须是有效的非负数')
     }
@@ -160,11 +166,10 @@ async function saveOrderFix() {
 
     const savedTotal = billTotal(cleanItems)
     if (!Number.isFinite(savedTotal)) throw new Error('修正后的金额超出有效范围')
-    const oldBill = editingOrder.value
     const now = Date.now()
-    const beforeSummary = (oldBill.items || [])
-      .map((i) => `${i.name}:${i.qty}×¥${i.price}`)
-      .join('，')
+    const beforeSummary = brokenDetails
+      ? JSON.stringify(oldBill.items) ?? '缺少明细'
+      : oldBill.items.map(i => `${i.name}:${i.qty}×¥${i.price}`).join('，')
     const afterSummary = cleanItems
       .map((i) => `${i.name}:${i.qty}×¥${i.price}`)
       .join('，')
@@ -414,7 +419,7 @@ function fmtTime(ts) {
               {{ b.date }} · {{ b.billNo }}
             </div>
             <div style="font-size:12px;color:#4B5563;margin-bottom:8px;">
-              {{ (b.items || []).map((i) => `${i.name} ${i.qty}×¥${i.price}`).join(' | ') }}
+              {{ hasNamedBillItems(b.items) ? b.items.map(i => `${i.name} ${i.qty}×¥${i.price}`).join(' | ') : '明细格式异常，请按原始单据补录。' }}
             </div>
             <button class="btn-sm primary" @click="openOrderFix(b)">修正数量 / 单价</button>
           </div>

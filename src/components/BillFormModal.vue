@@ -40,7 +40,7 @@ function buildRowsForCustomer(custName, existingItems = []) {
 
   const baseList =
     cust && Array.isArray(cust.categories) && cust.categories.length
-      ? cust.categories.filter((c) => c.enabled !== false)
+      ? cust.categories.filter((c) => typeof c?.name === 'string' && c.name.trim() && c.enabled !== false)
       : (props.products || []).map((p) => ({ name: p.name, unit: p.unit, price: p.defaultPrice }))
 
   const rows = baseList.map((cat) => {
