@@ -116,6 +116,7 @@ export function buildSettlementPreview({ month, customer, bills, template, fallb
   const dateParts = getMonthLastDateParts(month)
 
   return {
+    filteredBills,
     customerName: customer?.name || '留香东江酒店',
     sheetTitle: template?.sheetTitle || fallbackTitle || '广州市羽洁洗涤厂结算表',
     settlementDate: dateParts.text,
