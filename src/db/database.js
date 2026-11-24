@@ -20,8 +20,8 @@ export function isValidCloudUrl(url) {
 }
 
 export function getActiveCloudUrl() {
-  const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_URL_KEY) : ''
-  const url = (saved || DEFAULT_CLOUD_URL || '').trim()
+  const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_URL_KEY) : null
+  const url = (saved ?? DEFAULT_CLOUD_URL).trim()
   // 历史 localStorage 残留或被篡改的非官方地址一律视为未配置，不参与云同步
   return isValidCloudUrl(url) ? url : ''
 }
@@ -30,12 +30,15 @@ export function setSavedCloudUrl(url) {
   if (typeof localStorage === 'undefined') return false
   const clean = (url || '').trim().replace(/\/+$/, '')
   if (clean && !isValidCloudUrl(clean)) return false
-  if (clean) localStorage.setItem(STORAGE_URL_KEY, clean)
-  else localStorage.removeItem(STORAGE_URL_KEY)
+  localStorage.setItem(STORAGE_URL_KEY, clean.toLowerCase())
   return true
 }
 
 export const db = new Dexie('OfflineLedgerCloudDB', { addons: [dexieCloud] })
+export const deviceDb = new Dexie('OfflineLedgerDeviceDB')
+deviceDb.version(1).stores({ records: 'key' })
+
+const credentialFields = ['adminPin', 'adminPinHash', 'adminPinSalt', 'adminPinIsDefault']
 
 // v2: bills 增加 syncStatus / updatedAt；新增 auditLogs（管理员改单审计日志）
 db.version(2).stores({
@@ -53,8 +56,50 @@ if (cloudConfigured) {
   db.cloud.configure({
     databaseUrl: getActiveCloudUrl(),
     requireAuth: false, // 仅首次手动登录，之后自动沿用本地持久化 Token，不主动弹窗
-    tryUseServiceWorker: false
+    tryUseServiceWorker: false,
+    unsyncedProperties: { settings: credentialFields }
   })
+}
+
+export function pendingTransferKey() {
+  return `transfer:${cloudConfigured ? getActiveCloudUrl().toLowerCase() : 'local'}`
+}
+
+export function cloudNeedsVerification(user, error = '') {
+  if (!user?.isLoggedIn) return false
+  const expired = value => value && new Date(value).getTime() <= Date.now()
+  return /refresh token|401|unauthorized|invalid_grant/i.test(String(error?.message || error)) ||
+    Boolean(expired(user.accessTokenExpiration) && (!user.refreshToken || expired(user.refreshTokenExpiration)))
+}
+
+let reopeningCloud
+export async function syncCloudLedger() {
+  if (!db.cloud.currentUser.value?.isLoggedIn) throw new Error('请先登录云账本')
+  if (reopeningCloud) await reopeningCloud
+  const state = await db.table('$syncState').get('syncState')
+  const user = db.cloud.currentUser.value
+  if (!state?.realms?.includes(user.userId) && /error|offline/.test(db.cloud.syncState.value?.phase)) {
+    // 首次账号同步失败时 SDK 未启动后台同步。重新打开同一数据库来重试。
+    reopeningCloud ||= (async () => {
+      db.close()
+      await db.open()
+    })().finally(() => { reopeningCloud = undefined })
+    await reopeningCloud
+    const retried = await db.table('$syncState').get('syncState')
+    if (!retried?.realms?.includes(user.userId)) {
+      throw new Error(db.cloud.syncState.value.error?.message || '账号首次同步未完成，请重试')
+    }
+    return
+  }
+  let timer
+  try {
+    await Promise.race([
+      db.cloud.sync({ purpose: 'pull', wait: true }),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('同步超时，请检查网络后重试')), 20000) })
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 export const DEFAULT_PRODUCTS = [
@@ -96,21 +141,17 @@ export const DEFAULT_SETTINGS = {
   handlerName: '经手人'
 }
 
-// 管理员默认口令（仅用于首次迁移；之后以加盐哈希形式保存在本地/云库，不再明文可读）
+// 管理员默认口令仅用于本机首次配置。
 export const DEFAULT_ADMIN_PIN = '8888'
 
 export async function seedInitialData() {
   const now = Date.now()
   // 在同一读写事务内判空并写入，避免多标签页重复初始化。@id 由 Dexie Cloud 生成。
-  await db.transaction('rw', db.products, db.customers, db.settings, async () => {
+  if (!cloudConfigured) await db.transaction('rw', db.products, db.customers, async () => {
     if ((await db.products.count()) === 0) {
       await db.products.bulkAdd(
         DEFAULT_PRODUCTS.map((p) => ({ ...p, createdAt: now }))
       )
-    }
-
-    if ((await db.settings.get('profile')) === undefined) {
-      await db.settings.put({ key: 'profile', ...DEFAULT_SETTINGS })
     }
 
     if ((await db.customers.count()) === 0) {
@@ -144,16 +185,23 @@ export async function seedInitialData() {
 }
 
 export async function getSettings() {
-  const row = await db.settings.get('profile')
-  return row ? { ...DEFAULT_SETTINGS, ...row } : { ...DEFAULT_SETTINGS }
+  const row = (cloudConfigured && await db.settings.get('#profile')) || await db.settings.get('profile')
+  return {
+    companyName: row?.companyName ?? DEFAULT_SETTINGS.companyName,
+    handlerName: row?.handlerName ?? DEFAULT_SETTINGS.handlerName
+  }
 }
 
 export async function saveSettings(data) {
   // 事务内读-改-写：避免与改口令/恢复备份等并发写入互相整行覆盖、丢失字段
   await db.transaction('rw', db.settings, async () => {
-    const row = await db.settings.get('profile')
-    const current = row ? { ...DEFAULT_SETTINGS, ...row } : { ...DEFAULT_SETTINGS }
-    await db.settings.put({ key: 'profile', ...current, ...data })
+    const key = cloudConfigured ? '#profile' : 'profile'
+    const current = await getSettings()
+    const next = { ...current }
+    for (const key of ['companyName', 'handlerName']) {
+      if (typeof data[key] === 'string') next[key] = data[key]
+    }
+    await db.settings.put({ ...next, key })
   })
 }
 
@@ -261,101 +309,58 @@ export async function hashPin(pin, salt) {
   return sha256Hex(`${salt}::${String(pin)}`)
 }
 
+function adminCredentialKey() {
+  return 'admin:' + db.name
+}
+
 export async function verifyAdminPin(pin) {
-  // 全局统一限速：锁定期内直接拒绝，后台登录与口令弹窗两条入口共用同一份状态
   const lockState = loadPinLockState()
   if (lockState.lockUntil > Date.now()) return false
-  const row = await db.settings.get('profile')
-  if (row?.adminPinHash && row?.adminPinSalt) {
-    const hash = await hashPin(String(pin), row.adminPinSalt)
-    if (hash === row.adminPinHash) {
-      clearPinLockState()
-      return true
-    }
-    recordPinFailure(lockState)
-    return false
-  }
-  // 兼容旧版本：历史明文口令可直接比对，通过后自动迁移为哈希存储
-  const legacy = row?.adminPin !== undefined && String(row?.adminPin) !== ''
-    ? String(row.adminPin)
-    : DEFAULT_ADMIN_PIN
-  if (String(pin) !== legacy) {
-    recordPinFailure(lockState)
-    return false
-  }
   await ensureAdminCredential()
-  clearPinLockState()
-  return true
+  const row = await deviceDb.records.get(adminCredentialKey())
+  const valid = row
+    ? (await hashPin(pin, row.adminPinSalt)) === row.adminPinHash
+    : String(pin) === DEFAULT_ADMIN_PIN
+  if (valid) clearPinLockState()
+  else recordPinFailure(lockState)
+  return valid
 }
 
 export async function changeAdminPin(newPin) {
-  const row = (await db.settings.get('profile')) || {}
-  const salt = row.adminPinSalt || newSalt()
-  // 哈希计算（WebCrypto 异步）放在事务外，避免事务因等待非 IDB 异步而提前提交
-  const adminPinHash = await hashPin(String(newPin), salt)
-  await db.transaction('rw', db.settings, async () => {
-    // 事务内重新读取最新行，只覆盖凭据字段，保留并发写入的其他设置
-    const fresh = (await db.settings.get('profile')) || {}
-    const clean = {
-      ...fresh,
-      adminPinSalt: salt,
-      adminPinHash,
-      // 改回出厂默认口令时重新标记，强制管理员再次修改（默认口令已随开源代码公开）
-      adminPinIsDefault: String(newPin) === DEFAULT_ADMIN_PIN
-    }
-    delete clean.adminPin
-    await db.settings.put({ key: 'profile', ...clean })
+  const adminPinSalt = newSalt()
+  const adminPinHash = await hashPin(newPin, adminPinSalt)
+  await deviceDb.records.put({
+    key: adminCredentialKey(),
+    adminPinSalt,
+    adminPinHash,
+    adminPinIsDefault: String(newPin) === DEFAULT_ADMIN_PIN
   })
 }
 
 export async function ensureAdminCredential() {
-  const row = (await db.settings.get('profile')) || {}
-  // 推断当前口令是否仍为出厂默认（含历史版本已哈希迁移但从未改过的存量安装）
-  let isDefault = row.adminPinIsDefault === true
-  if (row.adminPinIsDefault === undefined) {
-    if (row.adminPinHash && row.adminPinSalt) {
-      isDefault = (await hashPin(DEFAULT_ADMIN_PIN, row.adminPinSalt)) === row.adminPinHash
-    } else {
-      const legacy = row?.adminPin !== undefined && String(row?.adminPin) !== ''
-        ? String(row.adminPin)
-        : DEFAULT_ADMIN_PIN
-      isDefault = legacy === DEFAULT_ADMIN_PIN
-    }
-  }
-  // 已是安全的哈希形态、无遗留明文且默认口令标记无变化时，无需每次启动都回写
-  // （减少并发覆盖窗口与同步抖动）
-  if (row.adminPinHash && row.adminPinIsDefault === isDefault && row.adminPin === undefined) return
+  const row = await db.settings.get('profile')
+  if (!row || !credentialFields.some(field => row[field] !== undefined)) return
+  const key = adminCredentialKey()
+  const legacyPin = String(row.adminPin ?? DEFAULT_ADMIN_PIN) || DEFAULT_ADMIN_PIN
   const salt = row.adminPinSalt || newSalt()
-  let adminPinHash = row.adminPinHash
-  if (!adminPinHash) {
-    const legacy = row?.adminPin !== undefined && String(row?.adminPin) !== ''
-      ? String(row.adminPin)
-      : DEFAULT_ADMIN_PIN
-    adminPinHash = await hashPin(legacy, salt)
-  }
+  const hash = row.adminPinHash && row.adminPinSalt ? row.adminPinHash : await hashPin(legacyPin, salt)
+  const isDefault = row.adminPinIsDefault ?? (hash === await hashPin(DEFAULT_ADMIN_PIN, salt))
+  // 先落盘到设备库，再清理旧副本。并发迁移不得覆盖新设置的口令。
+  await deviceDb.transaction('rw', deviceDb.records, async () => {
+    if (await deviceDb.records.get(key)) return
+    await deviceDb.records.put({ key, adminPinSalt: salt, adminPinHash: hash, adminPinIsDefault: isDefault })
+  })
   await db.transaction('rw', db.settings, async () => {
-    // 事务内重读最新行：若其他窗口刚写入了凭据/设置，以最新值为准，避免旧快照整行覆盖
-    const fresh = (await db.settings.get('profile')) || {}
-    const clean = { ...fresh }
-    // 盐与哈希必须成对写入：已有哈希则原样保留，否则写入本次计算的配对值，
-    // 避免“新盐 + 旧哈希”错配导致管理员口令永久无法验证
-    if (!fresh.adminPinHash) {
-      clean.adminPinSalt = salt
-      clean.adminPinHash = adminPinHash
-    }
-    clean.adminPinIsDefault = isDefault
-    delete clean.adminPin
-    await db.settings.put({ key: 'profile', ...clean })
+    const latest = await db.settings.get('profile')
+    if (!latest || !credentialFields.some(field => latest[field] !== undefined)) return
+    for (const field of credentialFields) delete latest[field]
+    await db.settings.put(latest)
   })
 }
 
-/**
- * 当前管理员口令是否仍为出厂默认（8888）。
- * 默认口令已随开源代码公开，UI 层应据此强制管理员先修改口令再放行敏感操作。
- */
 export async function isAdminPinDefault() {
-  const row = await db.settings.get('profile')
-  return row?.adminPinIsDefault === true
+  const row = await deviceDb.records.get(adminCredentialKey())
+  return row?.adminPinIsDefault !== false
 }
 
 export async function generateNextBillNo(dateStr) {

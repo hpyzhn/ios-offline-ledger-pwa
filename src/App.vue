@@ -1,8 +1,14 @@
 <script setup>
 import { ref, watch, onMounted, onUnmounted } from 'vue'
+import { billTotal } from './utils/money.js'
+import { createLedgerBackup, planLedgerMerge } from './db/ledgerBackup.js'
 import {
   db,
+  deviceDb,
   cloudConfigured,
+  syncCloudLedger,
+  ensureAdminCredential,
+  pendingTransferKey,
   getSettings,
   saveSettings,
   generateNextBillNo,
@@ -87,8 +93,9 @@ async function loadData() {
   ])
   // 序号守卫：丢弃过期的慢请求结果，防止旧月份/旧快照覆盖新数据
   if (seq !== loadDataSeq) return
-  customers.value = custs
-  products.value = prods
+  // 历史版本可能写入了多份完全相同的演示记录。保留库内数据和不同的客户模板。
+  customers.value = [...new Map(custs.map(c => [JSON.stringify([c.name, c.categories, c.exportTemplate]), c])).values()]
+  products.value = prods.length ? [...new Map(prods.map(p => [JSON.stringify([p.name, p.unit, p.defaultPrice]), p])).values()] : DEFAULT_PRODUCTS
   bills.value = monthBills
   settings.value = profile
   pendingSyncCount.value = pendingCount
@@ -121,7 +128,7 @@ async function autoCheckAndUploadOfflineData(manual = false) {
   syncingPending = true
   syncBanner.value = `检测到 ${pendingBills.length} 条离线未同步账单，正在自动上传云端...`
   try {
-    await db.cloud.sync({ wait: true })
+    await syncCloudLedger()
     if (pendingBills.length > 0) {
       await db.transaction('rw', db.bills, async () => {
         for (const snapshot of pendingBills) {
@@ -131,7 +138,7 @@ async function autoCheckAndUploadOfflineData(manual = false) {
           }
         }
       })
-      await db.cloud.sync({ wait: true })
+      await syncCloudLedger()
     }
     await loadData()
     syncBanner.value = pendingSyncCount.value > 0
@@ -190,7 +197,9 @@ onMounted(() => {
   }
   if (db.cloud?.events?.syncComplete) {
     subComplete = db.cloud.events.syncComplete.subscribe(() => {
-      loadData()
+      ensureAdminCredential().then(loadData).catch(err => {
+        syncBanner.value = '云端数据已收到，但本机读取失败：' + (err?.message || err)
+      })
     })
   }
 })
@@ -288,7 +297,8 @@ async function handleConfirmSmartImport(records) {
       for (let i = 0; i < records.length; i++) {
         const rec = records[i]
         if (!rec.items?.length || rec.items.some(i => !Number.isFinite(Number(i.qty)) || Number(i.qty) <= 0 || !Number.isFinite(Number(i.price)) || Number(i.price) < 0)) throw new Error('导入数据存在无效的数量或单价（数量需大于0，单价需为非负数）')
-        rec.totalAmount = Number(rec.items.reduce((sum, i) => sum + Number(i.qty) * Number(i.price), 0).toFixed(2))
+        rec.totalAmount = billTotal(rec.items)
+        if (!Number.isFinite(rec.totalAmount)) throw new Error('导入数据中的账单金额超出有效范围')
         const existing = await db.bills.where('date').equals(rec.date).toArray()
         const normalizeItems = (items) =>
           [...(items || [])]
@@ -602,20 +612,7 @@ async function handleSaveSettings(data) {
 
 async function handleBackupJson() {
   try {
-    // 管理员凭据属于本机安全数据，不随备份文件导出/迁移
-    const settingsDump = await getSettings()
-    delete settingsDump.adminPin
-    delete settingsDump.adminPinHash
-    delete settingsDump.adminPinSalt
-    delete settingsDump.adminPinIsDefault
-    const dump = {
-      version: 2,
-      exportedAt: new Date().toISOString(),
-      customers: await db.customers.toArray(),
-      products: await db.products.toArray(),
-      bills: await db.bills.toArray(),
-      settings: settingsDump
-    }
+    const dump = await createLedgerBackup(db, getSettings)
     const blob = new Blob([JSON.stringify(dump, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -647,14 +644,18 @@ async function handleRestoreJson(rawText) {
     if (parsed.customers !== undefined && (!Array.isArray(parsed.customers) || parsed.customers.some((c) => !isValidBackupCustomer(c)))) {
       return alert('备份中的客户数据（含类目/输出模板结构）无效，已取消导入')
     }
-    if (parsed.products !== undefined && (!Array.isArray(parsed.products) || parsed.products.some((p) => !p || typeof p !== 'object' || typeof p.name !== 'string'))) {
+    if (parsed.products !== undefined && (!Array.isArray(parsed.products) || parsed.products.some((p) => !p || typeof p.name !== 'string' || !p.name.trim() || !Number.isFinite(Number(p.defaultPrice)) || Number(p.defaultPrice) < 0))) {
       return alert('备份中的类目数据无效，已取消导入')
     }
-    const pendingCount = await db.bills.where('syncStatus').equals('pending').count()
-    const warn = pendingCount > 0
-      ? `\n⚠ 当前本机还有 ${pendingCount} 条账单未上传云端，恢复后将被备份内容替换且无法找回！`
-      : ''
-    if (!confirm('导入备份将覆盖当前所有客户模板和账单，确定继续吗？' + warn)) return
+    if (parsed.auditLogs !== undefined && (!Array.isArray(parsed.auditLogs) || parsed.auditLogs.some(log =>
+      !log || !Number.isFinite(log.createdAt) || typeof log.billNo !== 'string' ||
+      typeof log.customerName !== 'string' || typeof log.reason !== 'string'
+    ))) return alert('备份中的审计记录无效，已取消导入')
+    const targetUser = currentUser.value?.userId
+    if (cloudConfigured) {
+      if (!currentUser.value?.isLoggedIn) return alert('请先登录目标云账本并完成同步，再导入记录')
+      await syncCloudLedger()
+    }
 
     const now = Date.now()
     // 规范化：补齐 month/billNo/时间戳，金额以明细重算为准，全部标记待上传防止多端分叉
@@ -665,11 +666,13 @@ async function handleRestoreJson(rawText) {
         qty: Number(it.qty),
         price: Number(it.price)
       }))
-      const total = Number(items.reduce((s, it) => s + it.qty * it.price, 0).toFixed(2))
+      const total = billTotal(items)
+      if (!Number.isFinite(total)) throw new Error('备份中的账单金额超出有效范围')
       return {
         ...b,
         items,
         billNo: typeof b.billNo === 'string' && b.billNo ? b.billNo : `NO.${b.date.replace(/-/g, '')}-R${now}-${i}`,
+        restoreWithoutBillNo: !b.billNo,
         month: b.date.slice(0, 7),
         status: b.status === 'verified' ? 'verified' : 'pending',
         paymentMethod: b.paymentMethod || '月结挂账',
@@ -681,32 +684,48 @@ async function handleRestoreJson(rawText) {
       }
     })
 
-    await db.transaction('rw', db.customers, db.products, db.bills, db.settings, async () => {
-      // bulkPut 幂等写入：备份文件内重复主键不再导致整个恢复失败
-      if (Array.isArray(parsed.customers)) {
-        await db.customers.clear()
-        await db.customers.bulkPut(parsed.customers)
+    const records = { ...parsed, bills: normalizedBills }
+    const tables = [db.customers, db.products, db.bills, db.auditLogs, db.settings]
+    const preview = await db.transaction('r', tables, () => planLedgerMerge(db, records))
+    const target = cloudConfigured ? currentUser.value?.email || targetUser : '本地账本'
+    if (!confirm(`将合并到 ${target}。预计新增 ${preview.bills.length} 条账单、${preview.customers.length} 个客户、${preview.products.length} 个商品、${preview.auditLogs.length} 条审计记录。现有记录优先，是否继续？`)) return false
+    await db.transaction('rw', tables, async () => {
+      if (cloudConfigured && (!currentUser.value?.isLoggedIn || currentUser.value.userId !== targetUser)) {
+        throw new Error('当前云账号已变更，请重新确认导入目标')
       }
-      if (Array.isArray(parsed.products)) {
-        await db.products.clear()
-        await db.products.bulkPut(parsed.products)
+      const additions = await planLedgerMerge(db, records)
+      for (const [name, rows] of Object.entries(additions)) {
+        if (rows.length) await db[name].bulkPut(rows)
       }
-      await db.bills.clear()
-      await db.bills.bulkPut(normalizedBills)
-      if (parsed.settings && typeof parsed.settings === 'object') {
-        // 保留本机管理员凭据，拒绝备份文件携带的口令/哈希覆盖（防伪造备份提权/锁死）
-        const { adminPin, adminPinHash, adminPinSalt, adminPinIsDefault, key, ...safeSettings } = parsed.settings
-        await saveSettings(safeSettings)
+      if (!(await db.settings.get('profile')) && !(cloudConfigured && await db.settings.get('#profile'))) {
+        const profile = Object.fromEntries(['companyName', 'handlerName'].filter(key =>
+          typeof parsed.settings?.[key] === 'string'
+        ).map(key => [key, parsed.settings[key]]))
+        if (Object.keys(profile).length) await saveSettings(profile)
       }
     })
     await loadData()
-    alert('本地数据恢复成功')
+    alert('备份合并成功，原账本记录已保留')
     if (navigator.onLine && cloudConfigured && currentUser.value?.isLoggedIn) {
       autoCheckAndUploadOfflineData(false)
     }
+    return true
   } catch (err) {
     alert('导入失败：' + err.message)
   }
+}
+
+async function handlePendingTransfer() {
+  const key = pendingTransferKey()
+  const transfer = await deviceDb.records.get(key)
+  if (transfer && await handleRestoreJson(JSON.stringify(transfer.backup))) {
+    // 保存地址的另一个标签页可能已建立更新的迁移任务。
+    await deviceDb.transaction('rw', deviceDb.records, async () => {
+      if ((await deviceDb.records.get(key))?.id === transfer.id) await deviceDb.records.delete(key)
+    })
+    return true
+  }
+  return false
 }
 </script>
 
@@ -816,6 +835,7 @@ async function handleRestoreJson(rawText) {
       :visible="showAuthModal"
       :current-user="currentUser"
       :sync-state="syncState"
+      :apply-transfer="handlePendingTransfer"
       @close="showAuthModal = false"
       @synced="loadData"
     />

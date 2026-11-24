@@ -1,4 +1,5 @@
 <script setup>
+import { billTotal } from '../utils/money.js'
 import { ref, computed, watch } from 'vue'
 import { numberToChineseRMB, formatMoney } from '../utils/rmb'
 
@@ -137,7 +138,7 @@ const filledItems = computed(() =>
 )
 
 const totalAmount = computed(() =>
-  filledItems.value.reduce((s, i) => s + i.qty * i.price, 0)
+  billTotal(filledItems.value)
 )
 
 function handleSubmit() {
@@ -163,7 +164,7 @@ function handleSubmit() {
     status: status.value,
     remark: remark.value.trim(),
     items: filledItems.value,
-    totalAmount: Number(totalAmount.value.toFixed(2))
+    totalAmount: totalAmount.value
   })
 }
 </script>

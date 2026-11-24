@@ -1,3 +1,4 @@
+import { billTotal, allocateBillCents } from '../src/utils/money.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -19,7 +20,7 @@ test('smart parser loads and preserves explicit prices', () => {
 
 test('export preserves historical and zero prices in actual workbook', async () => {
   let output
-  const context = vm.createContext({ ExcelJS, getMonthLastDateParts,
+  const context = vm.createContext({ ExcelJS, getMonthLastDateParts, allocateBillCents,
     Blob, URL: { createObjectURL(blob) { output = blob; return 'blob:test' }, revokeObjectURL() {} },
     document: { createElement: () => ({ click() {} }) }
   })
@@ -39,6 +40,25 @@ test('export preserves historical and zero prices in actual workbook', async () 
     }
   })
   assert(found)
+
+  const fractional = {
+    ...input,
+    template: { ...input.template, includeDetailSheet: true },
+    bills: [{
+      customerName: 'A', date: '2026-11-21', totalAmount: 0.01,
+      items: ['Cloth', 'Towel'].map(name => ({ name, qty: 0.6, price: 0.01 }))
+    }]
+  }
+  assert.equal(context.buildSettlementPreview(fractional).grandTotal, 0.01)
+  await context.exportSettlementExcel(fractional)
+  await wb.xlsx.load(await output.arrayBuffer())
+  const amounts = []
+  wb.worksheets[0].eachRow(row => {
+    if (row.values.includes('Cloth') || row.values.includes('Towel')) amounts.push(row.getCell(36).value)
+  })
+  assert.deepEqual(amounts, [0.01, 0])
+  const detail = wb.getWorksheet('每笔交易明细')
+  assert.equal(detail.getCell('H2').value + detail.getCell('H3').value, 0.01)
 })
 
 test('admin total uses saved rows and audit failure rolls back bill', async () => {
@@ -50,7 +70,7 @@ test('admin total uses saved rows and audit failure rolls back bill', async () =
     auditLogs: { add: async () => { if (fail) throw Error('audit failure') }, orderBy: () => ({ reverse: () => ({ limit: () => ({ toArray: async () => [] }) }) }) },
     transaction: async (...args) => { const before = structuredClone(bill); try { await args.at(-1)() } catch(e) { bill = before; throw e } }
   }
-  const context = vm.createContext({db, ref: value => ({value}), computed: fn => ({get value(){return fn()}}), watch(){}, defineProps:()=>({}), defineEmits:()=>()=>{}, alert(){}})
+  const context = vm.createContext({db, billTotal, ref: value => ({value}), computed: fn => ({get value(){return fn()}}), watch(){}, defineProps:()=>({}), defineEmits:()=>()=>{}, alert(){}})
   vm.runInContext(script('../src/components/AdminPanelModal.vue'), context)
   vm.runInContext(`editingOrder.value = {id:'old',totalAmount:10,items:[]}; editItems.value = [{name:'Cloth',qty:10,price:2},{name:'',qty:5,price:100}]; editReason.value = 'correction'`, context)
   await assert.rejects(context.saveOrderFix(), /audit failure/)
@@ -62,7 +82,7 @@ test('admin total uses saved rows and audit failure rolls back bill', async () =
 })
 
 function appContext(db) {
-  return vm.createContext({ db, ref: value => ({value}), watch(){}, onMounted(){}, onUnmounted(){},
+  return vm.createContext({ db, billTotal, syncCloudLedger: () => db.cloud.sync(), ref: value => ({value}), watch(){}, onMounted(){}, onUnmounted(){},
     navigator: {onLine:true}, cloudConfigured:true, alert(){}, setTimeout(){},
     createDefaultExportTemplate:()=>({}), generateNextBillNo:async()=>webcrypto.randomUUID() })
 }

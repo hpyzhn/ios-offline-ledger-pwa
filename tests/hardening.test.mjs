@@ -1,3 +1,6 @@
+import { billTotal, allocateBillCents } from '../src/utils/money.js'
+import { createLedgerBackup, planLedgerMerge } from '../src/db/ledgerBackup.js'
+import { makeDeviceDb, credentialFields } from './device-fixture.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -44,6 +47,7 @@ function makeStoreDb({ bills = [], customers = [], products = [], settings = {} 
     }
   }
   const db = {
+    auditLogs: { toArray: async () => [], bulkPut: async () => {} },
     bills: {
       where: where(bills),
       toArray: async () => bills.map(b => structuredClone(b)),
@@ -85,7 +89,7 @@ function appContext(db, extra = {}) {
     ref: v => ({ value: v }),
     watch() {}, onMounted() {}, onUnmounted() {},
     navigator: { onLine: true },
-    cloudConfigured: true,
+    cloudConfigured: false, billTotal, createLedgerBackup, planLedgerMerge,
     alert: m => alerts.push(String(m)),
     confirm: () => true,
     setTimeout() {},
@@ -207,7 +211,7 @@ test('category index ops carry name guard against concurrent reordering', async 
 function excelContext() {
   const state = { output: null }
   const context = vm.createContext({
-    ExcelJS, getMonthLastDateParts, Blob,
+    ExcelJS, getMonthLastDateParts, allocateBillCents, Blob,
     URL: { createObjectURL(blob) { state.output = blob; return 'blob:test' }, revokeObjectURL() {} },
     document: { createElement: () => ({ click() {} }) }
   })
@@ -254,11 +258,12 @@ test('ensureAdminCredential always writes a matching salt/hash pair', async () =
     return origGet(key)
   }
   const src = read('../src/db/database.js')
-  const code = src.slice(src.indexOf('export async function saveSettings')).replace(/^export /gm, '')
-  const context = vm.createContext({ db, DEFAULT_SETTINGS: {}, DEFAULT_ADMIN_PIN: '8888', crypto: webcrypto, TextEncoder })
+  const code = src.slice(src.indexOf('export async function getSettings')).replace(/^export /gm, '')
+  const deviceDb = makeDeviceDb()
+  const context = vm.createContext({ db, deviceDb, credentialFields, cloudConfigured: false, DEFAULT_SETTINGS: {}, DEFAULT_ADMIN_PIN: '8888', crypto: webcrypto, TextEncoder })
   vm.runInContext(code, context)
   await context.ensureAdminCredential()
-  const row = settings.profile
+  const row = await deviceDb.records.get('admin:' + db.name)
   assert.equal(row.adminPinHash, await context.hashPin('8888', row.adminPinSalt))
 })
 
@@ -292,12 +297,13 @@ function makeLocalStorageMock() {
   }
 }
 
-// 从 saveSettings 起加载 database.js 的“数据层”切片（与现有测试同一约定）
+// 从 getSettings 起加载 database.js 的“数据层”切片（与现有测试同一约定）
 function databaseContext(db, extra = {}) {
   const src = read('../src/db/database.js')
-  const code = src.slice(src.indexOf('export async function saveSettings')).replace(/^export /gm, '')
+  const code = src.slice(src.indexOf('export async function getSettings')).replace(/^export /gm, '')
+  const deviceDb = makeDeviceDb()
   const context = vm.createContext({
-    db,
+    db, deviceDb, credentialFields, cloudConfigured: false,
     DEFAULT_SETTINGS: {},
     DEFAULT_ADMIN_PIN: '8888',
     crypto: webcrypto,
@@ -312,7 +318,8 @@ test('admin pin failures are rate-limited globally and persist across reloads', 
   const { storage, localStorage } = makeLocalStorageMock()
   const { db, settings } = makeStoreDb()
   settings.profile = { key: 'profile', adminPinHash: 'h', adminPinSalt: 's', adminPinIsDefault: false }
-  const mk = () => databaseContext(db, { localStorage })
+  const deviceDb = makeDeviceDb()
+  const mk = () => databaseContext(db, { localStorage, deviceDb })
 
   let ctx = mk()
   for (let i = 0; i < 5; i++) assert.equal(await ctx.verifyAdminPin('wrong'), false)
@@ -342,10 +349,8 @@ test('admin pin failures are rate-limited globally and persist across reloads', 
 
   // 口令校验成功后清除全部失败计数
   storage.delete('offline_ledger_admin_pin_lock')
-  settings.profile = { key: 'profile', adminPinSalt: 's2', adminPinIsDefault: false }
   ctx = mk()
-  const goodHash = await ctx.hashPin('654321', 's2')
-  settings.profile = { key: 'profile', adminPinHash: goodHash, adminPinSalt: 's2', adminPinIsDefault: false }
+  await ctx.changeAdminPin('654321')
   await ctx.verifyAdminPin('wrong')
   assert.equal(ctx.getAdminPinLockStatus().remainingAttempts, 4)
   assert.equal(await ctx.verifyAdminPin('654321'), true)

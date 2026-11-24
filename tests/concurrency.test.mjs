@@ -1,3 +1,6 @@
+import { billTotal } from '../src/utils/money.js'
+import { createLedgerBackup, planLedgerMerge } from '../src/db/ledgerBackup.js'
+import { makeDeviceDb, credentialFields } from './device-fixture.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -42,6 +45,7 @@ function makeStoreDb({ bills = [], customers = [], products = [], settings = {} 
     }
   }
   const db = {
+    auditLogs: { toArray: async () => [], bulkPut: async () => {} },
     bills: {
       where: where(bills),
       toArray: async () => bills.map(b => structuredClone(b)),
@@ -83,7 +87,7 @@ function appContext(db, extra = {}) {
     ref: v => ({ value: v }),
     watch() {}, onMounted() {}, onUnmounted() {},
     navigator: { onLine: true },
-    cloudConfigured: true,
+    cloudConfigured: false, billTotal, createLedgerBackup, planLedgerMerge,
     alert: m => alerts.push(String(m)),
     confirm: () => true,
     setTimeout() {},
@@ -188,9 +192,10 @@ test('category price op rejects negative price and keeps data', async () => {
 test('concurrent settings save and pin change keep both fields', async () => {
   const { db, settings } = makeStoreDb({ settings: { profile: { key: 'profile', companyName: 'Old' } } })
   const src = read('../src/db/database.js')
-  const code = src.slice(src.indexOf('export async function saveSettings')).replace(/^export /gm, '')
+  const code = src.slice(src.indexOf('export async function getSettings')).replace(/^export /gm, '')
+  const deviceDb = makeDeviceDb()
   const context = vm.createContext({
-    db,
+    db, deviceDb, credentialFields, cloudConfigured: false,
     DEFAULT_SETTINGS: { companyName: 'Default', handlerName: '经手人' },
     DEFAULT_ADMIN_PIN: '8888',
     crypto: webcrypto,
@@ -203,7 +208,9 @@ test('concurrent settings save and pin change keep both fields', async () => {
   ])
   const row = settings.profile
   assert.equal(row.companyName, 'NewCo')
-  assert.equal(row.adminPinHash, await context.hashPin('123456', row.adminPinSalt))
+  const credential = await deviceDb.records.get('admin:' + db.name)
+  assert.equal(credential.adminPinHash, await context.hashPin('123456', credential.adminPinSalt))
+  assert.equal(row.adminPinHash, undefined)
   assert.equal(row.adminPin, undefined)
 })
 
@@ -213,12 +220,15 @@ test('ensureAdminCredential does not rewrite an already migrated row', async () 
   const origPut = db.settings.put
   db.settings.put = async (row) => { puts++; return origPut(row) }
   const src = read('../src/db/database.js')
-  const code = src.slice(src.indexOf('export async function saveSettings')).replace(/^export /gm, '')
-  const context = vm.createContext({ db, DEFAULT_SETTINGS: {}, DEFAULT_ADMIN_PIN: '8888', crypto: webcrypto, TextEncoder })
+  const code = src.slice(src.indexOf('export async function getSettings')).replace(/^export /gm, '')
+  const deviceDb = makeDeviceDb()
+  const context = vm.createContext({ db, deviceDb, credentialFields, cloudConfigured: false, DEFAULT_SETTINGS: {}, DEFAULT_ADMIN_PIN: '8888', crypto: webcrypto, TextEncoder })
   vm.runInContext(code, context)
   await context.ensureAdminCredential()
-  assert.equal(puts, 0)
-  assert.equal(settings.profile.adminPinHash, 'h')
+  await context.ensureAdminCredential()
+  assert.equal(puts, 1)
+  assert.equal(settings.profile.adminPinHash, undefined)
+  assert.equal((await deviceDb.records.get('admin:' + db.name)).adminPinHash, 'h')
 })
 
 test('bill number generation works without crypto.randomUUID (non-secure context)', async () => {
@@ -247,13 +257,15 @@ test('restore normalizes bills, recomputes totals and preserves local credential
     settings: { companyName: 'New', adminPinHash: 'evilHash', adminPinSalt: 'evilSalt', adminPin: '0000' }
   }
   await context.handleRestoreJson(JSON.stringify(backup))
-  assert.equal(bills.length, 1)
-  assert.equal(bills[0].month, '2026-11')
-  assert.equal(bills[0].syncStatus, 'pending')
-  assert.equal(bills[0].totalAmount, 6)
-  assert(typeof bills[0].billNo === 'string' && bills[0].billNo.length > 0)
-  assert(Number.isFinite(bills[0].updatedAt))
-  assert.equal(settings.profile.companyName, 'New')
+  await context.handleRestoreJson(JSON.stringify(backup))
+  assert.equal(bills.length, 2)
+  assert.equal(bills[0].id, 'old')
+  assert.equal(bills[1].month, '2026-11')
+  assert.equal(bills[1].syncStatus, 'pending')
+  assert.equal(bills[1].totalAmount, 6)
+  assert(typeof bills[1].billNo === 'string' && bills[1].billNo.length > 0)
+  assert(Number.isFinite(bills[1].updatedAt))
+  assert.equal(settings.profile.companyName, 'Old')
   assert.equal(settings.profile.adminPinHash, 'curHash')
   assert.equal(settings.profile.adminPinSalt, 'curSalt')
   assert.equal(settings.profile.adminPin, undefined)
@@ -273,7 +285,7 @@ test('restore rejects invalid backup before clearing any data', async () => {
 
 function adminContext(db) {
   return vm.createContext({
-    db, ref: v => ({ value: v }), computed: fn => ({ get value() { return fn() } }),
+    db, billTotal, ref: v => ({ value: v }), computed: fn => ({ get value() { return fn() } }),
     watch() {}, defineProps: () => ({}), defineEmits: () => () => {}, alert() {}
   })
 }

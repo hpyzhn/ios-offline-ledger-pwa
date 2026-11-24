@@ -1,3 +1,5 @@
+import { billTotal } from './money.js'
+
 /**
  * 仿美团/淘宝/京东快递智能文本识别器
  * 支持一次性粘贴多个客户的报数信息，自动解析客户、日期、类目、数量、单价、核销状态与备注
@@ -190,9 +192,7 @@ function parseOneRecord(blockText, existingCustomers, globalProducts) {
 
   if (items.length === 0) return null
 
-  const totalAmount = Number(
-    items.reduce((sum, it) => sum + (Number(it.qty) || 0) * (Number(it.price) || 0), 0).toFixed(2)
-  )
+  const totalAmount = billTotal(items)
 
   return {
     id: 'preview_' + Math.random().toString(36).slice(2, 9),

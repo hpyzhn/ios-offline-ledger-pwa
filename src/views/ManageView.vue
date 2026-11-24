@@ -254,12 +254,12 @@ function onFileChange(e) {
       <div class="bill-card">
         <div style="font-weight:600;margin-bottom:6px;">本地离线数据备份</div>
         <div style="font-size:13px;color:#7F848A;margin-bottom:10px;">
-          导出 JSON 包含全部客户、专属输出模板、固定类目和历史账单，换手机可一键恢复。
+          JSON 备份包含客户、输出模板、商品、历史账单和审计记录。导入前可预览新增数量。
         </div>
         <div style="display:flex;gap:10px;">
           <button class="btn-block btn-secondary" @click="emit('backupJson')">导出 JSON 备份</button>
           <label class="btn-block btn-secondary" style="text-align:center;display:block;">
-            导入恢复
+            预览并合并备份
             <input type="file" accept="application/json" style="display:none;" @change="onFileChange" />
           </label>
         </div>

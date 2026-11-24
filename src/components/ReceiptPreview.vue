@@ -1,12 +1,15 @@
 <script setup>
+import { computed } from 'vue'
 import { numberToChineseRMB, formatMoney } from '../utils/rmb'
+import { allocateBillCents } from '../utils/money.js'
 
-defineProps({
+const props = defineProps({
   visible: Boolean,
   bill: Object,
   settings: Object
 })
 
+const amounts = computed(() => allocateBillCents(props.bill?.items || [], props.bill?.totalAmount))
 const emit = defineEmits(['close', 'toggleVerify'])
 
 // Vue 模板无法直接访问 window，需通过 setup 暴露的方法调用打印
@@ -50,7 +53,7 @@ function printReceipt() {
                 <td>{{ item.unit }}</td>
                 <td class="num">{{ item.qty }}</td>
                 <td class="num">{{ formatMoney(item.price) }}</td>
-                <td class="num">{{ formatMoney(item.qty * item.price) }}</td>
+                <td class="num">{{ formatMoney(amounts[idx] / 100) }}</td>
               </tr>
             </tbody>
           </table>

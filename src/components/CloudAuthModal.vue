@@ -1,11 +1,16 @@
 <script setup>
-import { ref, watch } from 'vue'
-import { db, cloudConfigured, getActiveCloudUrl, localLedgerOnly, setSavedCloudUrl } from '../db/database'
+import { computed, ref, watch } from 'vue'
+import {
+  db, deviceDb, cloudConfigured, cloudNeedsVerification, getActiveCloudUrl, getSettings,
+  isValidCloudUrl, localLedgerOnly, pendingTransferKey, setSavedCloudUrl, syncCloudLedger
+} from '../db/database'
+import { createLedgerBackup } from '../db/ledgerBackup.js'
 
 const props = defineProps({
   visible: Boolean,
   currentUser: Object,
-  syncState: Object
+  syncState: Object,
+  applyTransfer: Function
 })
 
 const emit = defineEmits(['close', 'synced'])
@@ -14,6 +19,14 @@ const urlInput = ref('')
 const emailInput = ref('')
 const busy = ref(false)
 const tip = ref('')
+const transfer = ref(null)
+const copyOnSwitch = ref(true)
+const authNeeded = computed(() =>
+  cloudNeedsVerification(props.currentUser, props.syncState?.error) || cloudNeedsVerification(props.currentUser, tip.value)
+)
+const refreshTransfer = async () => {
+  transfer.value = await deviceDb.records.get(pendingTransferKey())
+}
 
 watch(
   () => props.visible,
@@ -22,22 +35,39 @@ watch(
     urlInput.value = getActiveCloudUrl()
     emailInput.value = props.currentUser?.email || ''
     tip.value = ''
+    refreshTransfer().catch(err => { tip.value = '无法读取本机迁移记录：' + err.message })
   }
 )
 
-function handleSaveUrl() {
-  const clean = urlInput.value.trim()
-  // 底层仅接受 https://xxx.dexie.cloud 官方地址，防止同步数据被指向任意第三方服务器
-  if (!setSavedCloudUrl(clean)) {
+async function handleSaveUrl() {
+  if (busy.value) return
+  const clean = urlInput.value.trim().replace(/\/+$/, '').toLowerCase()
+  if (clean && !isValidCloudUrl(clean)) {
     return alert('云数据库地址无效：仅支持 https://xxxx.dexie.cloud 形式的 Dexie Cloud 官方地址')
   }
-  alert(clean ? '云同步地址已保存，页面将自动刷新生效' : '已清除云同步地址，将切回纯本地模式')
-  if (localLedgerOnly) {
+  const source = cloudConfigured ? getActiveCloudUrl().toLowerCase() : ''
+  busy.value = true
+  try {
+    if (source !== clean) {
+      const backup = await createLedgerBackup(db, getSettings)
+      const action = copyOnSwitch.value ? '在目标账本确认后合并' : '本次仅切换账本'
+      if (!confirm(`当前有 ${backup.bills.length} 条账单和 ${backup.customers.length} 个客户。切换后原账本仍保留，${action}。是否继续？`)) return
+      if (copyOnSwitch.value) {
+        const key = `transfer:${clean || 'local'}`
+        await deviceDb.transaction('rw', deviceDb.records, async () => {
+          if (await deviceDb.records.get(key)) throw new Error('目标已有待迁移记录，请先到目标账本处理，或取消勾选迁移再切换')
+          await deviceDb.records.put({ key, id: crypto.randomUUID(), backup })
+        })
+      }
+    }
+    if (!setSavedCloudUrl(clean)) throw new Error('无法保存云数据库地址')
     const url = new URL(window.location.href)
     url.searchParams.delete('ledger')
     window.location.replace(url.href)
-  } else {
-    window.location.reload()
+  } catch (err) {
+    tip.value = '切换失败：' + (err?.message || err)
+  } finally {
+    busy.value = false
   }
 }
 
@@ -48,20 +78,17 @@ async function handleLogin() {
   busy.value = true
   tip.value = ''
   try {
-    // 如果本地已经处于登录态且邮箱一致，直接同步，不再重复发送验证码
     const cur = db.cloud.currentUser?.value
-    const email = emailInput.value.trim()
-    if (cur?.isLoggedIn && (!email || cur.email === email)) {
-      await db.cloud.sync({ wait: true })
-      tip.value = '当前已保持登录状态，已完成同步'
-      emit('synced')
-      return
-    }
+    // 将重新验证固定到现有账号，避免 SDK 切换账号时清空本机云库。
+    const email = cur?.isLoggedIn ? cur.email : emailInput.value.trim()
+    if (cur?.isLoggedIn && !email) throw new Error('此会话未提供邮箱，请先导出备份，再重新配置账号')
     if (email) {
-      await db.cloud.login({ email })
+      await db.cloud.login({ email, grant_type: 'otp' })
     } else {
       await db.cloud.login()
     }
+    await syncCloudLedger()
+    tip.value = '邮箱已验证，云账本已同步'
     emit('synced')
   } catch (err) {
     tip.value = '登录未完成：' + (err?.message || err)
@@ -75,7 +102,7 @@ async function handleSyncNow() {
   busy.value = true
   tip.value = ''
   try {
-    await db.cloud.sync({ wait: true })
+    await syncCloudLedger()
     tip.value = '云端同步完成'
     emit('synced')
   } catch (err) {
@@ -86,13 +113,24 @@ async function handleSyncNow() {
 }
 
 async function handleLogout() {
-  if (!confirm('退出登录后本机将停止同步该账号数据，确定退出吗？')) return
+  if (!confirm('退出登录会清理当前云账本的本机副本。请先导出 JSON 备份，避免丢失未上传数据。确定退出吗？')) return
   busy.value = true
   try {
     await db.cloud.logout()
     emit('synced')
   } catch (err) {
     tip.value = '退出登录失败：' + (err?.message || err)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function handleTransfer() {
+  busy.value = true
+  try {
+    if (await props.applyTransfer()) await refreshTransfer()
+  } catch (err) {
+    tip.value = '迁移失败：' + (err?.message || err)
   } finally {
     busy.value = false
   }
@@ -113,7 +151,7 @@ async function handleLogout() {
         <div style="background:#F3F4F6;border-radius:10px;padding:12px;margin-bottom:14px;">
           <div style="font-size:13px;color:#6B7280;">当前账号状态</div>
           <div v-if="currentUser?.isLoggedIn" style="font-size:16px;font-weight:700;color:#259B5E;margin-top:4px;">
-            已登录：{{ currentUser.email || currentUser.userId }}
+            {{ authNeeded ? '需要重新验证' : '已登录' }}：{{ currentUser.email || currentUser.userId }}
           </div>
           <div v-else style="font-size:15px;font-weight:600;color:#111827;margin-top:4px;">
             未登录（当前仅保存于本机离线库）
@@ -132,9 +170,12 @@ async function handleLogout() {
             退出登录
           </button>
         </div>
+        <button v-if="currentUser?.isLoggedIn" class="btn-block btn-secondary" :disabled="busy" @click="handleLogin">
+          重新验证当前邮箱
+        </button>
 
         <!-- 未登录：邮箱验证码登录 -->
-        <div v-else-if="cloudConfigured" style="margin-bottom:16px;">
+        <div v-if="cloudConfigured && !currentUser?.isLoggedIn" style="margin-bottom:16px;">
           <div class="form-group">
             <label class="form-label">输入邮箱接收免费登录验证码（支持手机与电脑同号同步）</label>
             <input
@@ -150,6 +191,9 @@ async function handleLogout() {
         </div>
 
         <div v-if="tip" style="font-size:13px;color:#259B5E;margin-bottom:12px;">{{ tip }}</div>
+        <button v-if="transfer" class="btn-block btn-primary" :disabled="busy || (cloudConfigured && !currentUser?.isLoggedIn)" @click="handleTransfer">
+          预览并合并待迁移账本（{{ transfer.backup.bills.length }} 条账单）
+        </button>
 
         <!-- Dexie Cloud 地址配置 -->
         <div style="border-top:1px solid #EAECEF;padding-top:14px;">
@@ -164,10 +208,11 @@ async function handleLogout() {
               placeholder="https://xxxxxx.dexie.cloud"
               style="flex:1;"
             />
-            <button class="btn-sm primary" style="white-space:nowrap;padding:0 12px;" @click="handleSaveUrl">
+            <button class="btn-sm primary" style="white-space:nowrap;padding:0 12px;" :disabled="busy" @click="handleSaveUrl">
               保存
             </button>
           </div>
+          <label><input v-model="copyOnSwitch" type="checkbox" /> 切换地址时准备迁移当前账本</label>
         </div>
       </div>
     </div>

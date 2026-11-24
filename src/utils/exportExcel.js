@@ -1,5 +1,6 @@
 import ExcelJS from 'exceljs'
 import { getMonthLastDateParts } from './rmb'
+import { allocateBillCents } from './money.js'
 
 function colToLetter(colNum1Based) {
   let s = ''
@@ -41,9 +42,11 @@ export function buildSettlementPreview({ month, customer, bills, template, fallb
 
   const categoryOrder = []
   const categoryMap = new Map()
+  const details = []
 
   ;(Array.isArray(customer?.categories) ? customer.categories : []).forEach((c) => {
     if (c.enabled === false) return
+    if (categoryMap.has(c.name)) return
     categoryOrder.push(c.name)
     categoryMap.set(c.name, {
       name: c.name,
@@ -62,7 +65,14 @@ export function buildSettlementPreview({ month, customer, bills, template, fallb
     const dayNum = Number((b.date || '').slice(8, 10))
     const dayIdx = dayNum >= 1 && dayNum <= 31 ? dayNum - 1 : -1
 
-    ;(b.items || []).forEach((it) => {
+    const items = (b.items || []).map(item => ({
+      ...item,
+      qty: Number(item.qty) || 0,
+      price: Number.isFinite(Number(item.price)) ? Number(item.price) : categoryMap.get(item.name)?.price || 0
+    }))
+    const amounts = allocateBillCents(items, Number.isFinite(b.totalAmount) ? b.totalAmount : undefined)
+    details.push({ bill: b, items, amounts })
+    items.forEach((it, index) => {
       if (!categoryMap.has(it.name)) {
         categoryOrder.push(it.name)
         categoryMap.set(it.name, {
@@ -79,12 +89,10 @@ export function buildSettlementPreview({ month, customer, bills, template, fallb
       }
       const row = categoryMap.get(it.name)
       const qty = Number(it.qty) || 0
-      const price = Number(it.price)
       if (dayIdx >= 0 && qty !== 0) {
         row.days[dayIdx] = Number((row.days[dayIdx] + qty).toFixed(3))
       }
-      const itemPrice = Number.isFinite(price) ? price : row.price
-      row.totalAmount = Number((row.totalAmount + qty * itemPrice).toFixed(2))
+      row.totalAmount = (Math.round(row.totalAmount * 100) + amounts[index]) / 100
       if (b.status === 'verified') row.verifiedCount += 1
       else row.pendingCount += 1
       if (b.remark) row.remarks.add(b.remark)
@@ -100,7 +108,7 @@ export function buildSettlementPreview({ month, customer, bills, template, fallb
   const includeZero = template?.includeZeroRows !== false
   const rows = categoryOrder
     .map((name) => categoryMap.get(name))
-    .filter((r) => includeZero || r.totalQty !== 0)
+    .filter((r) => includeZero || r.totalQty !== 0 || r.totalAmount !== 0)
 
   const activeTailCols = (Array.isArray(template?.tailColumns) ? template.tailColumns : []).filter((c) => c && c.enabled)
   const grandTotal = Number(rows.reduce((s, r) => s + r.totalAmount, 0).toFixed(2))
@@ -116,7 +124,7 @@ export function buildSettlementPreview({ month, customer, bills, template, fallb
     activeTailCols,
     grandTotal,
     grandQty,
-    filteredBills
+    details
   }
 }
 
@@ -338,8 +346,8 @@ export async function exportSettlementExcel({ month, customer, bills, template, 
       { header: '核销状态', key: 'status', width: 10 },
       { header: '备注', key: 'remark', width: 18 }
     ]
-    data.filteredBills.forEach((b) => {
-      ;(b.items || []).forEach((it) => {
+    data.details.forEach(({ bill: b, items, amounts }) => {
+      items.forEach((it, index) => {
         wsDetail.addRow({
           billNo: sanitizeCell(b.billNo),
           date: sanitizeCell(b.date),
@@ -348,7 +356,7 @@ export async function exportSettlementExcel({ month, customer, bills, template, 
           unit: sanitizeCell(it.unit || ''),
           qty: Number(it.qty) || 0,
           price: Number(it.price) || 0,
-          subtotal: Number(((Number(it.qty) || 0) * (Number(it.price) || 0)).toFixed(2)),
+          subtotal: amounts[index] / 100,
           paymentMethod: sanitizeCell(b.paymentMethod || '月结挂账'),
           status: b.status === 'verified' ? '已核销' : '未核销',
           remark: sanitizeCell(b.remark || '')
