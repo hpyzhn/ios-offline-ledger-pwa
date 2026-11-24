@@ -100,11 +100,11 @@ export const DEFAULT_ADMIN_PIN = '8888'
 
 export async function seedInitialData() {
   const now = Date.now()
-  // 使用固定主键 + bulkPut，保证多标签页并发首启时也不会重复写入
+  // 在同一读写事务内判空并写入，避免多标签页重复初始化。@id 由 Dexie Cloud 生成。
   await db.transaction('rw', db.products, db.customers, db.settings, async () => {
     if ((await db.products.count()) === 0) {
-      await db.products.bulkPut(
-        DEFAULT_PRODUCTS.map((p, i) => ({ ...p, id: 'seed_product_' + i, createdAt: now }))
+      await db.products.bulkAdd(
+        DEFAULT_PRODUCTS.map((p) => ({ ...p, createdAt: now }))
       )
     }
 
@@ -113,9 +113,8 @@ export async function seedInitialData() {
     }
 
     if ((await db.customers.count()) === 0) {
-      await db.customers.bulkPut([
+      await db.customers.bulkAdd([
         {
-          id: 'seed_customer_1',
           name: '留香东江酒店',
           categories: DEFAULT_PRODUCTS.map((p) => ({
             name: p.name,
@@ -127,7 +126,6 @@ export async function seedInitialData() {
           createdAt: now
         },
         {
-          id: 'seed_customer_2',
           name: '餐厅A',
           categories: [
             { name: '台布', unit: '条', price: 1.0, enabled: true },
